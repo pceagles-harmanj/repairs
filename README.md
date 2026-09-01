@@ -725,7 +725,8 @@ POST /u/<id>.<mac>/one-click   RFC 8058 one-click unsubscribe
 | 403 from Google on device search | the signed-in account lacks Chrome device privileges, or the Admin SDK API is not enabled on the project |
 | Device search finds nothing | serials are exact; asset tags match `asset_id:`; for a person use their full email |
 | Email fails with `insufficient permission` | the Gmail API is not enabled, or the connected account has no Gmail mailbox |
-| `invalid ELF header` / `NODE_MODULE_VERSION` after moving the folder between machines | `rm -rf node_modules && npm install` (better-sqlite3 is a native module) |
+| `invalid ELF header` / `NODE_MODULE_VERSION` after moving the folder between machines | `rm -rf node_modules && npm install` (better-sqlite3 is a native module). In Docker this is `.dockerignore` doing its job - make sure it excludes `node_modules` |
+| Docker build dies on `node-gyp rebuild` / `find Python` | npm could not fetch a prebuilt better-sqlite3 and tried to compile in an image without a toolchain. The shipped Dockerfile is multi-stage and installs `python3 make g++` in the builder for exactly this - rebuild with the current Dockerfile |
 | Everything is slow | check that `data/repairs.db` is on local disk, not a synced folder like Drive or iCloud |
 | Backup says "same disk as the database" | the NAS share is not mounted (that is the point of the check) - mount it, or set `BACKUP_ALLOW_SAME_DISK=true` for a deliberate local copy |
 | Emails have no status/unsubscribe link | `PUBLIC_SITE_URL` is not set |

@@ -13,6 +13,8 @@ services:
     image: repairs:local
     container_name: repairs
     restart: unless-stopped
+    # Reap zombies and forward signals without adding tini to the image.
+    init: true
     env_file:
       - ../.env
     ports:

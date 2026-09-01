@@ -134,6 +134,40 @@ app unless you stopped it deliberately (`restart: unless-stopped`).
 
 ---
 
+### If the build fails on `better-sqlite3`
+
+```
+npm error command sh -c node-gyp rebuild
+npm error gyp ERR! find Python
+```
+
+That is npm failing to download the prebuilt binary and falling back to
+compiling from source in an image with no compiler. The Dockerfile in this repo
+builds in two stages precisely so this cannot happen: the builder stage installs
+`python3 make g++`, compiles, and proves the module loads; the runtime image
+copies the finished `node_modules`. If you hit the error above you are building
+an older Dockerfile — `git pull` (or re-`rsync`) and build again.
+
+Two related traps worth knowing:
+
+- **`.dockerignore` matters.** Without it, `COPY . .` copies the host's
+  `node_modules` over the Linux one built in the image. On a Mac-built checkout
+  that means macOS binaries in a Linux container: `invalid ELF header` at
+  startup. The repo ships a `.dockerignore` that excludes `node_modules`, `data`
+  and `.env`.
+- **A stale `package-lock.json`** (written before a dependency was added) makes
+  `npm ci` abort. The Dockerfile falls back to `npm install` automatically, but
+  for reproducible builds refresh it once on your Mac and copy it over:
+  `npm install --package-lock-only`.
+
+To watch a build closely:
+
+```bash
+docker compose -f deploy/docker-compose.prod.yml build --progress=plain --no-cache
+```
+
+---
+
 ## 7. DNS in Webmin
 
 On the BIND box (`192.168.10.50`), in **Webmin → Servers → BIND DNS Server**:
