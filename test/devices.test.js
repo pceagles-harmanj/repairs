@@ -50,3 +50,39 @@ test('devices with no asset tag are not crashed on', () => {
   const ranked = google.rankDevices('24-1', [dev(null, null), dev('24-1', 'S')]);
   assert.equal(ranked[0].asset_tag, '24-1');
 });
+
+// ---- the request Google actually accepts -----------------------------------
+
+test('device list requests never carry an orderBy Google would reject', () => {
+  // The Admin SDK 400s on anything outside this set: "Invalid value at 'order_by'".
+  assert.deepEqual(google.VALID_ORDER_BY.slice().sort(), [
+    'annotatedLocation', 'annotatedUser', 'lastSync', 'notes', 'serialNumber', 'status', 'supportEndDate',
+  ]);
+
+  // annotatedAssetId is the tempting one, and it is not allowed.
+  const dropped = google.deviceListParams({ orderBy: 'annotatedAssetId' });
+  assert.equal('orderBy' in dropped, false);
+  assert.equal('sortOrder' in dropped, false);
+
+  const kept = google.deviceListParams({ orderBy: 'lastSync', sortOrder: 'DESCENDING' });
+  assert.equal(kept.orderBy, 'lastSync');
+  assert.equal(kept.sortOrder, 'DESCENDING');
+});
+
+test('the loaner query is scoped to the org unit and sorted by us, not Google', () => {
+  const params = google.deviceListParams({
+    query: 'asset_id:Loaner-012',
+    orgUnitPath: '/Devices/Loaners',
+    maxResults: 25,
+  });
+  assert.equal(params.customerId, 'my_customer');
+  assert.equal(params.projection, 'FULL');
+  assert.equal(params.orgUnitPath, '/Devices/Loaners');
+  assert.equal(params.query, 'asset_id:Loaner-012');
+  assert.equal('orderBy' in params, false, 'ranking happens in rankDevices');
+});
+
+test('sortOrder alone is dropped - it is only valid with an orderBy', () => {
+  const params = google.deviceListParams({ sortOrder: 'DESCENDING' });
+  assert.equal('sortOrder' in params, false);
+});

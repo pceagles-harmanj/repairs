@@ -248,15 +248,37 @@ async function getDevice(deviceId, { force = false } = {}) {
   }
 }
 
+/**
+ * The only values Google's chromeosdevices.list accepts for orderBy. Anything
+ * else is a 400 ("Invalid value at 'order_by'"), so we filter rather than trust
+ * ourselves - there is no annotatedAssetId here, however much you want one.
+ * https://developers.google.com/admin-sdk/directory/reference/rest/v1/chromeosdevices/list
+ */
+const VALID_ORDER_BY = [
+  'annotatedLocation', 'annotatedUser', 'lastSync', 'notes', 'serialNumber', 'status', 'supportEndDate',
+];
+
+/** Build the list request in one place, dropping anything Google would reject. */
+function deviceListParams({ query = null, orgUnitPath = null, maxResults = 25, orderBy = null, sortOrder = null } = {}) {
+  const params = { customerId: 'my_customer', projection: 'FULL', maxResults };
+  if (query) params.query = query;
+  if (orgUnitPath) params.orgUnitPath = orgUnitPath;
+  if (orderBy) {
+    if (VALID_ORDER_BY.includes(orderBy)) {
+      params.orderBy = orderBy;
+      // sortOrder is only meaningful alongside a valid orderBy.
+      if (sortOrder) params.sortOrder = sortOrder;
+    } else {
+      console.warn(`! ignoring unsupported device orderBy "${orderBy}" (Google accepts: ${VALID_ORDER_BY.join(', ')})`);
+    }
+  }
+  return params;
+}
+
 async function listPage(query, maxResults = 25) {
-  const res = await directory().chromeosdevices.list({
-    customerId: 'my_customer',
-    projection: 'FULL',
-    maxResults,
-    orderBy: 'lastSync',
-    sortOrder: 'DESCENDING',
-    ...(query ? { query } : {}),
-  });
+  const res = await directory().chromeosdevices.list(
+    deviceListParams({ query, maxResults, orderBy: 'lastSync', sortOrder: 'DESCENDING' })
+  );
   return (res.data.chromeosdevices || []).map(normalizeDevice);
 }
 
@@ -394,14 +416,11 @@ function isLoaner(device) {
 }
 
 async function listOrgUnitPage(query, maxResults = 50) {
-  const res = await directory().chromeosdevices.list({
-    customerId: 'my_customer',
-    orgUnitPath: config.loaner.orgUnit,
-    projection: 'FULL',
-    maxResults,
-    orderBy: 'annotatedAssetId',
-    ...(query ? { query } : {}),
-  });
+  // No orderBy: asset tags are not a sortable field in this API, and we rank the
+  // results ourselves anyway (exact tag first - see rankDevices).
+  const res = await directory().chromeosdevices.list(
+    deviceListParams({ query, orgUnitPath: config.loaner.orgUnit, maxResults })
+  );
   return (res.data.chromeosdevices || []).map(normalizeDevice);
 }
 
@@ -613,6 +632,8 @@ module.exports = {
   disconnect,
   resetClientCache,
   normalizeDevice,
+  deviceListParams,
+  VALID_ORDER_BY,
   cacheDevice,
   readCachedDevice,
   getDevice,

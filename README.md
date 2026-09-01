@@ -742,6 +742,7 @@ POST /u/<id>.<mac>/one-click   RFC 8058 one-click unsubscribe
 | A shipment says delivered but the parts are not on the shelf | that is exactly what the two states are for: click **Receive** when you physically check them in |
 | Camera scanning or "Install app" stopped working in production | plain http is an insecure origin - add it to Chrome's `OverrideSecurityRestrictionsOnInsecureOrigin` policy in Google Admin, or move to https (deploy/RUNBOOK.md step 9) |
 | A loaner tag is not found | the device must be in `LOANER_ORG_UNIT` in Google Admin; "Show pool" lists what is there |
+| `Invalid value at 'order_by'` from Google | a device list request asked to sort by a field the Admin SDK does not support (asset tag is not sortable). `deviceListParams()` in `src/google.js` filters these now - if you add a call, sort client-side instead |
 | Scanning types the tag but nothing happens | the scanner is not sending Enter - set it to append a carriage return, or press Enter yourself |
 | No camera button on the asset-tag fields | that browser has no `BarcodeDetector` (Firefox, older Safari). Chrome and ChromeOS do; handheld scanners work everywhere |
 | The repair note did not reach Google | the ticket needs a linked Google device and the write scope; the ticket timeline has the error, and the drawer button retries |
