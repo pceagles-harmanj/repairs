@@ -1,0 +1,40 @@
+# Production compose for the repair app.
+#
+#   cd /opt/repairs && docker compose -f deploy/docker-compose.prod.yml up -d --build
+#
+# Two ports, on purpose:
+#   8080  the tech app  - LAN only, never forward this
+#   8081  the student status site - the only thing worth exposing later
+services:
+  repairs:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: repairs:local
+    container_name: repairs
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    volumes:
+      # the database and its WAL live here - back this up (it is also what the
+      # nightly job copies to the NAS)
+      - ./data:/app/data
+      # the NAS share, mounted on the host at /mnt/nas-repairs (see runbook)
+      - /mnt/nas-repairs:/backups
+    environment:
+      - NODE_ENV=production
+      - TZ=America/Chicago
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

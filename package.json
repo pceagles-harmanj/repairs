@@ -1,0 +1,27 @@
+{
+  "name": "repair-tickets",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Chromebook/device repair ticket management with Google Workspace lookups and status emails",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/*.test.js",
+    "seed:demo": "node scripts/seed-demo.js",
+    "backup": "node scripts/backup.js",
+    "check-oauth": "node scripts/check-oauth.js",
+    "track": "node -e \"require('./src/tracking').poll({force:true,respectHours:false}).then(r=>console.log(JSON.stringify(r,null,1)))\""
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "google-auth-library": "^10.5.0",
+    "googleapis": "^176.0.0"
+  }
+}

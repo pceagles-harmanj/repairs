@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Repair Tickets</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#8A1538">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Repairs">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128295;</text></svg>">
+</head>
+<body>
+
+<!-- login (only shown when APP_PASSWORD is set) -->
+<div id="login" class="login-wrap" hidden>
+  <div class="card">
+    <h2>Repair Tickets</h2>
+    <form id="login-form">
+      <label class="field"><span>Your name</span><input type="text" id="login-name" placeholder="e.g. Jacob" autocomplete="name"></label>
+      <label class="field"><span>Shared password</span><input type="password" id="login-password" autocomplete="current-password" required></label>
+      <button class="btn primary" type="submit" style="width:100%">Sign in</button>
+      <p id="login-error" class="small" style="color:var(--danger)" hidden></p>
+    </form>
+  </div>
+</div>
+
+<div id="app" hidden>
+  <header class="topbar">
+    <div class="brand"><span class="dot"></span> Repair Tickets</div>
+    <nav class="tabs">
+      <button data-view="tickets" class="active">Tickets</button>
+      <button data-view="devices">Devices</button>
+      <button data-view="loaners">Loaners</button>
+      <button data-view="inventory">Inventory</button>
+      <button data-view="settings">Settings</button>
+    </nav>
+    <div class="spacer"></div>
+    <div id="dry-run-badge" class="small" style="color:var(--warn)" hidden>DRY RUN &mdash; email is logged, not sent</div>
+    <div id="gstate" class="gstate" title="Google Workspace connection"><span class="pip"></span><span class="txt">checking&hellip;</span></div>
+    <button class="btn primary" id="new-ticket-btn">New ticket</button>
+    <button class="btn ghost sm" id="logout-btn" hidden>Sign out</button>
+  </header>
+
+  <main>
+    <!-- ================= TICKETS ================= -->
+    <section class="view" id="view-tickets">
+      <div class="stats" id="stats"></div>
+      <div class="toolbar">
+        <div class="chips" id="status-chips"></div>
+        <div class="grow"><input type="search" id="ticket-search" placeholder="Search serial, asset tag, student, issue&hellip;"></div>
+        <button class="btn sm" id="refresh-tickets">Refresh</button>
+      </div>
+      <table class="bordered">
+        <thead><tr>
+          <th style="width:60px">#</th><th>Device</th><th>User</th><th>Issue</th>
+          <th style="width:150px">Status</th><th style="width:120px">Assigned</th><th style="width:110px">Updated</th>
+        </tr></thead>
+        <tbody id="ticket-rows"></tbody>
+      </table>
+      <div class="empty" id="tickets-empty" hidden>No tickets match this filter.</div>
+    </section>
+
+    <!-- ================= DEVICES ================= -->
+    <section class="view" id="view-devices" hidden>
+      <div class="card">
+        <h2>Look up a device in Google Admin</h2>
+        <div class="toolbar">
+          <div class="grow"><input type="search" id="device-search" placeholder="Serial number, asset tag, or user email"></div>
+          <button class="btn primary" id="device-search-btn">Search</button>
+          <button class="btn sm" id="device-recent-btn">Recently synced</button>
+        </div>
+        <div class="device-hits" id="device-hits"></div>
+        <div class="empty" id="devices-empty" hidden>Search by serial, asset tag, or the student's email.</div>
+      </div>
+    </section>
+
+    <!-- ================= LOANERS ================= -->
+    <section class="view" id="view-loaners" hidden>
+      <div class="stats" id="loaner-stats"></div>
+      <div class="toolbar">
+        <div class="chips" id="loaner-chips"></div>
+        <div class="grow"></div>
+        <button class="btn sm" id="loaner-refresh">Refresh</button>
+      </div>
+      <div id="loaner-table"></div>
+      <div class="card" id="loaner-reminders" style="margin-top:16px"></div>
+    </section>
+
+    <!-- ================= INVENTORY ================= -->
+    <section class="view" id="view-inventory" hidden>
+      <div class="stats" id="inv-stats"></div>
+      <div class="toolbar">
+        <div class="chips" id="inv-tabs"></div>
+        <div class="grow"><input type="search" id="inv-search" placeholder="Search parts, bins, models, donor serials&hellip;"></div>
+        <button class="btn primary" id="inv-add">Add part</button>
+        <button class="btn sm" id="inv-refresh">Refresh</button>
+      </div>
+      <div id="inv-body"></div>
+    </section>
+
+    <!-- ================= SETTINGS ================= -->
+    <section class="view" id="view-settings" hidden>
+      <div class="card">
+        <h2>Google Workspace</h2>
+        <div id="google-panel"></div>
+      </div>
+
+      <div class="card">
+        <h2>Status email templates</h2>
+        <p class="small">
+          <button class="btn sm" id="tpl-reset">Reset to the school templates</button>
+          <span class="small muted" style="margin-left:8px">Replaces the wording with the shipped maroon-and-gold
+            versions. Your auto-send switches are kept.</span>
+        </p>
+        <p class="small muted">Placeholders: <span class="mono">{{ticket_number}} {{first_name}} {{user_name}} {{user_email}} {{serial}} {{asset_tag}} {{model}} {{status_label}} {{issue_description}} {{issue_category}} {{priority}} {{assigned_to}} {{loaner_serial}} {{estimated_cost}} {{latest_note}} {{created_at}} {{org_name}} {{helpdesk_name}} {{helpdesk_signature}} {{loaner_line}} {{loaner_asset_tag}}
+          {{repair_line}} {{repair_summary}} {{status_url}} {{unsubscribe_url}}
+          {{brand_primary}} {{brand_accent}} {{brand_ink}} {{brand_muted}} {{brand_wash}} {{brand_border}}</span></p>
+        <div class="split">
+          <div class="tpl-list" id="tpl-list"></div>
+        <div id="tpl-editor"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Parcel tracking</h2>
+        <div id="tracking-panel"></div>
+      </div>
+
+      <div class="card">
+        <h2>Nightly backup</h2>
+        <div id="backup-panel"></div>
+      </div>
+
+      <div class="card">
+        <h2>Public status site</h2>
+        <div id="public-site-panel"></div>
+      </div>
+
+      <div class="card">
+        <h2>Unsubscribed addresses</h2>
+        <p class="small muted">People who used "stop all repair emails" on the public site. Nothing is sent to these
+          addresses on any ticket until they are resubscribed.</p>
+        <div id="optout-panel"></div>
+      </div>
+
+      <div class="card">
+        <h2>Email log</h2>
+        <button class="btn sm" id="refresh-emails">Refresh</button>
+        <div id="email-log" style="margin-top:12px"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="overlays"></div>
+<script src="/app.js"></script>
+</body>
+</html>
