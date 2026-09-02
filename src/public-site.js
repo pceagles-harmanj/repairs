@@ -128,10 +128,54 @@ const partsNote = (t) =>
     ? `<div class="note" style="margin-top:14px">${esc(t.parts_expectation)}</div>`
     : '';
 
-const loanerReminder = (t) =>
-  t.loaner_asset_tag && !t.loaner_returned_at
-    ? `<div class="note" style="margin-top:14px">Please bring loaner <b>${esc(t.loaner_asset_tag)}</b> with you when you collect your device.</div>`
+/**
+ * The loaner, as a section of its own.
+ *
+ * The one thing this has to land is the swap: we hand the repaired device back
+ * when the loaner comes in. Said once in passing, it gets missed and the student
+ * turns up empty-handed; said plainly at the top of the page, it does not.
+ */
+function loanerCard(t) {
+  const tag = t.loaner_asset_tag || t.loaner_serial;
+  if (!tag) return '';
+  const due = t.loaner_due || {};
+  const out = !t.loaner_returned_at;
+  const readyToSwap = out && (t.status === 'ready_for_pickup' || t.status === 'closed');
+
+  const rows = [
+    ['Loaner', esc(tag)],
+    t.loaner_model ? ['Model', esc(t.loaner_model)] : null,
+    t.loaner_issued_at ? ['Borrowed', esc(fmtDate(t.loaner_issued_at))] : null,
+    out && due.due_day ? ['Due back', esc(due.due_label || due.due_day)] : null,
+    !out ? ['Returned', esc(fmtDate(t.loaner_returned_at))] : null,
+  ].filter(Boolean);
+
+  const status = !out
+    ? '<p style="margin:0">Thank you &mdash; this loaner is back with us. Nothing else to do.</p>'
+    : due.overdue
+    ? `<div class="err" style="margin:0 0 12px">This loaner was due back on ${esc(due.due_label || due.due_day)}.
+        Please return it to the ${esc(config.helpdeskName)} as soon as you can.</div>`
+    : due.due_today
+    ? `<div class="note" style="margin:0 0 12px">This loaner is due back <b>today</b>.</div>`
     : '';
+
+  const swap = readyToSwap
+    ? `<div class="highlight" style="margin:0 0 14px">Bring loaner ${esc(tag)} with you.
+        We hand your own device back when the loaner comes in.</div>`
+    : out
+    ? `<p style="margin:12px 0 0">Keep using it until your device is ready. When we tell you it is ready,
+        <b>bring the loaner with you</b> &mdash; we swap the two over at the counter.</p>`
+    : '';
+
+  return `<div class="card">
+    <h2>Your loaner device</h2>
+    ${swap}
+    ${status}
+    <dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
+    ${out ? `<p class="sub" style="margin:14px 0 0">Please look after it: it goes to the next student when you
+      are done. If something goes wrong with the loaner itself, tell the ${esc(config.helpdeskName)}.</p>` : ''}
+  </div>`;
+}
 
 function ticketPage(t, history) {
   // The repair's own steps, with the parts journey folded in where it happened,
@@ -172,7 +216,11 @@ function ticketPage(t, history) {
     <h1>Repair ticket #${esc(t.id)}</h1>
     <p class="sub">Last updated ${esc(fmtDate(t.updated_at))}</p>
     ${t.status === 'ready_for_pickup'
-      ? `<div class="highlight">Your ${esc(t.model || 'device')} is fixed and waiting for you at the ${esc(config.helpdeskName)}.</div>`
+      ? `<div class="highlight">Your ${esc(t.model || 'device')} is fixed and waiting for you at the ${esc(config.helpdeskName)}.${
+          (t.loaner_asset_tag || t.loaner_serial) && !t.loaner_returned_at
+            ? ` Bring loaner ${esc(t.loaner_asset_tag || t.loaner_serial)} with you &mdash; we swap the two over.`
+            : ''
+        }</div>`
       : ''}
     <div class="card">
       ${statusBlock(t)}
@@ -181,13 +229,10 @@ function ticketPage(t, history) {
         ${t.asset_tag ? `<dt>Asset tag</dt><dd>${esc(t.asset_tag)}</dd>` : ''}
         <dt>Reported issue</dt><dd>${esc(t.issue_description)}</dd>
         <dt>Opened</dt><dd>${esc(fmtDate(t.created_at))}</dd>
-        ${t.loaner_asset_tag || t.loaner_serial
-          ? `<dt>Loaner</dt><dd>${esc(t.loaner_asset_tag || t.loaner_serial)}${t.loaner_returned_at ? ' (returned)' : ''}</dd>`
-          : ''}
       </dl>
       ${partsNote(t)}
-      ${loanerReminder(t)}
     </div>
+    ${loanerCard(t)}
     <div class="card"><h2>Progress</h2><ol class="steps">${steps}</ol></div>
     ${(t.parts_milestones || []).some((m) => m.done)
       ? `<div class="card">
@@ -344,7 +389,10 @@ const publicTicket = (row) => ({
   parts_expectation: require('./shipments').expectationForTicket(row.id),
   parts_milestones: require('./shipments').milestonesForTicket(row.id),
   loaner_asset_tag: row.loaner_asset_tag,
+  loaner_model: row.loaner_model,
+  loaner_issued_at: row.loaner_issued_at,
   loaner_returned_at: row.loaner_returned_at,
+  loaner_due: require('./loaners').dueInfo(row),
   user_email: row.user_email,
 });
 

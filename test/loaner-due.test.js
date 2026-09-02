@@ -2,9 +2,10 @@
 /** Due dates on school days, and the reminder pass that chases them. */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { isolate, startServer } = require('./helpers');
+const { isolate, startServer, startPublicServer } = require('./helpers');
 
 isolate();
+process.env.PUBLIC_SITE_URL = 'https://repairs.example.org';
 process.env.LOANER_ORG_UNIT = '/Devices/Loaners';
 process.env.LOANER_DUE_SCHOOL_DAYS = '5';
 process.env.SCHOOL_HOLIDAYS = '2026-11-25..2026-11-27,2026-12-24';
@@ -28,8 +29,9 @@ google.appendDeviceNote = async () => ({ notes: '', dropped: 0, line: '' });
 google.getAccount = () => ({ email: 'it-admin@example.org' });
 
 let srv;
-test.before(async () => { srv = await startServer(); });
-test.after(async () => { await srv.close(); });
+let site;
+test.before(async () => { srv = await startServer(); site = await startPublicServer(); });
+test.after(async () => { await srv.close(); await site.close(); });
 
 const makeLoan = async (over = {}) => {
   const { body } = await srv.call('/api/tickets', {
@@ -255,4 +257,70 @@ test('the reminder schedule reports itself for Settings', () => {
   assert.ok(status.holidays.includes('2026-11-26'));
   const ms = loaners.msUntilNextRun(new Date());
   assert.ok(ms > 0 && ms <= 24 * 60 * 60 * 1000);
+});
+
+// ---- what the student sees about the loaner --------------------------------
+
+const links = require('../src/lib/links');
+const publicPage = async (ticketId) =>
+  (await fetch(site.base + '/t/' + links.mint('t', ticketId))).text();
+
+test('the loaner has a section of its own with the details on it', async () => {
+  const id = await makeLoan();
+  const html = await publicPage(id);
+
+  assert.match(html, /Your loaner device/);
+  assert.match(html, /Loaner-012/);
+  assert.match(html, /Acer Chromebook 511/, 'the model is shown');
+  assert.match(html, /Borrowed/);
+  assert.match(html, /Due back/);
+  assert.match(html, /bring the loaner with you/i, 'the swap is explained while it is out');
+});
+
+test('when the repair is ready, the swap is the loudest thing on the page', async () => {
+  const id = await makeLoan();
+  await srv.call('/api/tickets/' + id, { method: 'PATCH', body: { status: 'ready_for_pickup', notify: false } });
+  const html = await publicPage(id);
+
+  // said in the banner at the top...
+  assert.match(html, /is fixed and waiting for you.*Bring loaner Loaner-012 with you/s);
+  // ...and again, emphasised, in the loaner section
+  assert.match(html, /class="highlight"[^>]*>\s*Bring loaner Loaner-012 with you\.\s*We hand your own device back when the loaner comes in/);
+});
+
+test('an overdue loaner says so plainly', async () => {
+  const id = await makeLoan();
+  setDue(id, dayOffset(-3));
+  const html = await publicPage(id);
+  assert.match(html, /was due back on/i);
+  assert.match(html, /as soon as you can/i);
+});
+
+test('a returned loaner thanks them and stops nagging', async () => {
+  const id = await makeLoan();
+  await srv.call(`/api/tickets/${id}/loaner/return`, { method: 'POST' });
+  const html = await publicPage(id);
+  assert.match(html, /this loaner is back with us/i);
+  assert.match(html, /Returned/);
+  assert.ok(!/Bring loaner/.test(html), 'no swap instructions once it is back');
+  assert.ok(!/due back/i.test(html));
+});
+
+test('a ticket with no loaner has no loaner section at all', async () => {
+  const { body } = await srv.call('/api/tickets', {
+    method: 'POST',
+    body: { serial: 'NOLOAN', asset_tag: 'PC-77', model: 'Lenovo 300e', user_email: 'sam@example.org',
+            issue_description: 'Battery', notify: false },
+  });
+  const html = await publicPage(body.ticket.id);
+  assert.ok(!/Your loaner device/.test(html));
+});
+
+test('the pickup email uses the same words as the page', async () => {
+  const id = await makeLoan();
+  const preview = (await srv.call(`/api/tickets/${id}/email/preview`, {
+    method: 'POST', body: { status: 'ready_for_pickup' },
+  })).body.preview;
+  assert.match(preview.body, /Bring loaner Loaner-012 with you/);
+  assert.match(preview.body, /we hand your own device back when the loaner comes in/i);
 });

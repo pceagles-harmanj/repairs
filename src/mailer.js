@@ -37,9 +37,12 @@ function loanerLine(ticket, statusKey) {
   const tag = ticket.loaner_asset_tag || ticket.loaner_serial;
   if (!tag || ticket.loaner_returned_at) return '';
   const status = statusKey || ticket.status;
-  if (status === 'ready_for_pickup') return `Please bring loaner ${tag} with you when you collect your device.`;
-  if (status === 'closed') return `Please return loaner ${tag} to the technology office if you still have it.`;
-  return `You have loaner ${tag} in the meantime - please hang on to it until your device is ready.`;
+  // The swap is the part people miss, so say it the same way everywhere.
+  if (status === 'ready_for_pickup') {
+    return `Bring loaner ${tag} with you - we hand your own device back when the loaner comes in.`;
+  }
+  if (status === 'closed') return `If you still have loaner ${tag}, please return it to the technology office.`;
+  return `You have loaner ${tag} in the meantime - keep it until your device is ready, then bring it with you to swap.`;
 }
 
 function fmtDate(value) {
