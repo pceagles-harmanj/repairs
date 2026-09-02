@@ -27,7 +27,24 @@ fi
 mount -a
 echo "==> mounted:"
 df -h "$MOUNT_POINT"
+
+# Drop a marker ON THE SHARE. It disappears the moment the share is not mounted,
+# which is the one mount test that cannot be fooled by bind mounts or device
+# numbers. Set BACKUP_MARKER_FILE=.repairs-nas in .env to have the app check it.
+MARKER="${MOUNT_POINT}/.repairs-nas"
+if [ ! -f "$MARKER" ]; then
+  if touch "$MARKER" 2>/dev/null; then
+    echo "==> wrote marker $MARKER (set BACKUP_MARKER_FILE=.repairs-nas in .env)"
+  else
+    echo "!! could not write $MARKER - is the share read-only?"
+  fi
+fi
+
 echo
 echo "The app writes backups to /backups inside the container, which compose maps"
 echo "to $MOUNT_POINT here. If this mount is missing, the nightly job refuses to"
 echo "run rather than quietly writing to the container's own disk."
+echo
+echo "IMPORTANT: if the container was already running, restart it now -"
+echo "  a mount made on the host after the container started is invisible inside it."
+echo "  docker compose restart      (or: pct reboot <CTID>)"

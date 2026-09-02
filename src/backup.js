@@ -13,7 +13,11 @@ const path = require('path');
 const zlib = require('zlib');
 const { pipeline } = require('stream/promises');
 const config = require('./config');
-const { getDb } = require('./db');
+const { getDb, getSetting, setSetting } = require('./db');
+
+// Remembered from the last successful run, so a later failure can tell
+// "the share dropped" apart from "the share was never mounted".
+const LAST_GOOD_KEY = 'backup:last_good_target';
 
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -70,6 +74,12 @@ function describeTarget(dir = config.backup.dir) {
       info.files = names.length;
       info.newest = names.length ? names[names.length - 1] : null;
     } catch { /* ignore */ }
+    // A file that exists only on the share is the most reliable mount test
+    // there is - no device numbers, no propagation rules, just "is it there".
+    if (config.backup.marker) {
+      info.marker = config.backup.marker;
+      info.marker_present = fs.existsSync(path.join(dir, config.backup.marker));
+    }
   } catch {
     info.problem = `${dir} does not exist from where the app is running`;
     return info;
@@ -79,8 +89,23 @@ function describeTarget(dir = config.backup.dir) {
   // really a backup" case that BACKUP_ALLOW_SAME_DISK deliberately overrides.
   // Reporting them separately keeps the description honest and the decision
   // where it belongs, in doBackup().
+  // What did this look like the last time a backup actually landed?
+  const lastGood = readLastGood();
+  if (lastGood) {
+    info.last_good_device = lastGood.device || null;
+    info.last_good_at = lastGood.at || null;
+    info.device_changed = Boolean(lastGood.device && info.device && lastGood.device !== info.device);
+  }
+
   if (!info.writable) {
     info.problem = `${dir} is not writable by the app`;
+  } else if (info.marker && info.marker_present === false) {
+    info.warning = `${dir} exists but the marker file ${info.marker} is missing, so the share is not mounted`;
+  } else if (info.marker && info.marker_present) {
+    // The marker is the strongest evidence available: it lives on the share, so
+    // if it is visible the share is mounted. Trust it over the device-number
+    // heuristics below, which cannot see through every bind-mount arrangement.
+    info.warning = null;
   } else if (info.same_fs_as_root) {
     info.warning = `${dir} is on the same filesystem as the app itself, so it is not a mounted share - `
       + 'anything written there stays inside the container and is lost with it';
@@ -88,6 +113,47 @@ function describeTarget(dir = config.backup.dir) {
     info.warning = `${dir} is on the same disk as the database, so a copy there is not a backup`;
   }
   return info;
+}
+
+function readLastGood() {
+  try {
+    const raw = getSetting(LAST_GOOD_KEY);
+    return typeof raw === 'string' ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+function rememberGoodTarget(target) {
+  if (!target || !target.device) return;
+  setSetting(LAST_GOOD_KEY, JSON.stringify({
+    device: target.device, dir: target.dir, at: new Date().toISOString(),
+  }));
+}
+
+/**
+ * The evidence, in the order a person would check it. The point is that the
+ * message names what to do next rather than restating that it failed.
+ */
+function mountAdvice(target) {
+  const lines = [];
+  if (target.device_changed) {
+    lines.push(
+      `This worked on ${new Date(target.last_good_at).toLocaleString()} when ${target.dir} was a different `
+      + 'filesystem, so the share has since been unmounted - a NAS reboot or a dropped SMB session will do that. '
+      + 'Re-mount it on the Proxmox host, then RESTART the container: a mount made on the host after the '
+      + 'container started is invisible inside it, which is why the app still sees a plain local folder.'
+    );
+  } else {
+    lines.push(
+      'Mount the share on the Proxmox host and restart the container (a mount made on the host after the '
+      + 'container started is not visible inside it).'
+    );
+  }
+  lines.push(
+    `To check from the host: \`findmnt ${target.dir}\` and \`pct exec <CTID> -- findmnt ${target.dir}\` - `
+    + 'if the host shows a mount and the container does not, restarting the container is the whole fix.'
+  );
+  lines.push('Or set BACKUP_ALLOW_SAME_DISK=true if a local copy really is what you want.');
+  return lines.join(' ');
 }
 
 function record(entry) {
@@ -165,9 +231,7 @@ async function doBackup({ reason = 'manual', dir = config.backup.dir, allowSameD
     return { result: 'error', error: target.problem, target };
   }
   if (target.warning && !allowSameDisk) {
-    const error = `${target.warning}. Mount the share and restart the container `
-      + '(a mount made on the host after the container started is not visible inside it), '
-      + 'or set BACKUP_ALLOW_SAME_DISK=true if a local copy really is what you want.';
+    const error = `${target.warning}. ${mountAdvice(target)}`;
     record({ result: 'error', error });
     return { result: 'error', error, target };
   }
@@ -227,6 +291,10 @@ async function doBackup({ reason = 'manual', dir = config.backup.dir, allowSameD
     }
 
     cleanup();
+    // Remember what a working target looked like, so if this folder is ever a
+    // plain local directory again we can say the share dropped rather than
+    // guessing it was never set up.
+    rememberGoodTarget(target);
     const removed = prune(dir, config.backup.keepDays);
     const duration = Date.now() - started;
     record({ path: destination, bytes: remote.size, result: 'ok', duration_ms: duration });
@@ -318,4 +386,5 @@ function status() {
 
 module.exports = {
   runBackup, startScheduler, stopScheduler, msUntilNextRun, history, status, prune, stamp, describeTarget,
+  mountAdvice, rememberGoodTarget, LAST_GOOD_KEY,
 };

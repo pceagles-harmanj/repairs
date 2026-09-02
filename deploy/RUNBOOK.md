@@ -119,6 +119,70 @@ shows up as a failed backup in Settings rather than a silent non-backup.
 > is it a mount point / how many backup files it can see), so this fails loudly
 > rather than quietly.
 
+## 5b. When the backup says "/backups is on the same disk as the database"
+
+That message means the app looked at `/backups` and found an ordinary folder on
+the container's own disk, not the NAS. Work through it in this order - the first
+two commands usually settle it:
+
+```bash
+# 1. On the Proxmox host: is the share actually mounted?
+findmnt /mnt/nas-repairs
+ls -la /mnt/nas-repairs            # backups should be listed here
+
+# 2. In the container: does IT see the mount?
+pct exec 101 -- findmnt /backups
+pct exec 101 -- ls -la /backups
+```
+
+- **Host shows a mount, container does not** - this is the common one. A mount
+  made on the host *after* the container started is invisible inside it: the
+  container has its own mount namespace and kept the empty directory it saw at
+  boot. Fix: `pct reboot 101` (or `docker compose restart` if the bind is
+  Docker-side). Nothing else needs changing.
+- **Host shows no mount** - the share dropped. A NAS reboot, an expired
+  credential, or an SMB session timeout will do it, and `nofail` in fstab means
+  boot succeeded quietly without it. Fix: `mount -a` on the host, confirm with
+  `findmnt`, then restart the container.
+- **Neither shows anything** - the mount was never set up in this container.
+  Re-run `deploy/nas-mount.sh` and add the bind mount:
+  `pct set 101 -mp0 /mnt/nas-repairs,mp=/backups`.
+
+### Make the next failure diagnose itself
+
+Create a marker file that lives **on the share** and tell the app to look for
+it. A device-number check can be fooled by bind mounts; a file that vanishes
+with the mount cannot:
+
+```bash
+touch /mnt/nas-repairs/.repairs-nas     # on the host, with the share mounted
+# then in .env:
+BACKUP_MARKER_FILE=.repairs-nas
+```
+
+The app now says "the marker file is missing, so the share is not mounted"
+instead of inferring it from disk devices. It also remembers what the target
+looked like the last time a backup landed, so a later failure can tell you the
+share *used to* work and has since been unmounted - with the `findmnt` commands
+to confirm it.
+
+### If you would rather the app never touched the NAS
+
+Point `BACKUP_DIR` at a local folder with `BACKUP_ALLOW_SAME_DISK=true`, and
+copy to the NAS from the host on a timer:
+
+```bash
+# /etc/systemd/system/repairs-backup-sync.service  (host)
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/rsync -a --delete /var/lib/vz/.../backups/ /mnt/nas-repairs/
+```
+
+This is more robust - a NAS outage stops the copy, not the backup - but the app
+can no longer verify that anything reached the NAS, so watch the timer instead.
+
+---
+
 ## 6. Start it
 
 ```bash

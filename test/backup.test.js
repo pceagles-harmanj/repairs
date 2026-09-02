@@ -208,3 +208,55 @@ test('the error names which step failed, not just the errno', async () => {
   assert.equal(res.result, 'error');
   assert.match(res.error, /does not exist/i);
 });
+
+// ---- telling "share dropped" from "share never mounted" --------------------
+
+test('a missing marker file is reported as an unmounted share', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'marker-'));
+  process.env.BACKUP_MARKER_FILE = '.repairs-nas';
+  delete require.cache[require.resolve('../src/config')];
+  delete require.cache[require.resolve('../src/backup')];
+  const freshBackup = require('../src/backup');
+
+  const missing = freshBackup.describeTarget(dir);
+  assert.equal(missing.marker_present, false);
+  assert.match(missing.warning, /marker file \.repairs-nas is missing/);
+
+  // Drop the marker in and the objection goes away.
+  fs.writeFileSync(path.join(dir, '.repairs-nas'), '');
+  const present = freshBackup.describeTarget(dir);
+  assert.equal(present.marker_present, true);
+  assert.equal(present.warning, null, 'a marked share is accepted even on the same disk');
+
+  delete process.env.BACKUP_MARKER_FILE;
+  delete require.cache[require.resolve('../src/config')];
+  delete require.cache[require.resolve('../src/backup')];
+});
+
+test('once a backup has landed, a later local folder is called out as a dropped share', () => {
+  const backup = require('../src/backup');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dropped-'));
+
+  // Pretend last night's backup landed on a share with a different device id.
+  backup.rememberGoodTarget({ device: '999999', dir, at: new Date().toISOString() });
+  const target = backup.describeTarget(dir);
+
+  assert.equal(target.device_changed, true, 'the filesystem under the folder changed');
+  const advice = backup.mountAdvice(target);
+  assert.match(advice, /has since been unmounted/);
+  assert.match(advice, /RESTART the container/);
+  assert.match(advice, /findmnt/, 'the message hands over a command to run');
+});
+
+test('with no history, the advice does not claim the share ever worked', () => {
+  const backup = require('../src/backup');
+  const { getDb } = require('../src/db');
+  getDb().prepare('DELETE FROM settings WHERE key = ?').run(backup.LAST_GOOD_KEY);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'never-'));
+
+  const target = backup.describeTarget(dir);
+  assert.ok(!target.device_changed);
+  const advice = backup.mountAdvice(target);
+  assert.doesNotMatch(advice, /has since been unmounted/);
+  assert.match(advice, /Mount the share on the Proxmox host/);
+});
