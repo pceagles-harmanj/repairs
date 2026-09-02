@@ -322,6 +322,11 @@ Three things to compare:
 3. **The host directory must be mounted before the container starts** (see the
    note in step 6).
 
+**`ENOENT` when writing the backup.** SQLite cannot create its backup file directly
+on a CIFS share. The app stages the backup on local disk and copies the finished
+file across, so this should not happen - if you see it, you are running a build
+from before that change. Rebuild.
+
 **Backups.** The nightly job at 01:00 writes `repairs-YYYY-MM-DD_HHMMSS.db.gz`
 to the NAS and prunes past `BACKUP_KEEP_DAYS`. To restore: stop the app,
 `gunzip` a file over `data/repairs.db`, start it.

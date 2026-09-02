@@ -153,3 +153,58 @@ test('an unreachable NAS is reported, not silently skipped', async () => {
   assert.equal(status.last.result, 'error');
   assert.equal(status.last_ok.result, 'ok', 'the last good run is still remembered');
 });
+
+// ---- staging, and what happens when the share misbehaves -------------------
+
+test('SQLite writes locally and only the finished file is copied to the share', async () => {
+  const res = await backup.runBackup({ reason: 'test' });
+  assert.equal(res.result, 'ok');
+  assert.equal(path.dirname(res.path), nasDir, 'the finished file lands on the share');
+
+  // nothing is left behind in staging
+  const staging = path.join(path.dirname(process.env.DB_PATH), '.backup-staging');
+  const leftovers = fs.existsSync(staging) ? fs.readdirSync(staging) : [];
+  assert.deepEqual(leftovers, [], 'staging is cleaned up after a good copy');
+
+  // and the copy is byte-identical to a fresh gunzip
+  const restored = zlib.gunzipSync(fs.readFileSync(res.path));
+  assert.ok(restored.length > 0);
+  assert.equal(restored.subarray(0, 15).toString(), 'SQLite format 3');
+});
+
+test('a target that cannot be written to is refused before any work is done', async () => {
+  // a path that exists as a file: nothing can be written "into" it
+  const wall = path.join(nasDir, 'wall');
+  fs.writeFileSync(wall, 'x');
+  const res = await backup.runBackup({ reason: 'test', dir: path.join(wall, 'sub'), allowSameDisk: true });
+  assert.equal(res.result, 'error');
+  assert.match(res.error, /not writable|does not exist/i);
+
+  const staging = path.join(path.dirname(process.env.DB_PATH), '.backup-staging');
+  const leftovers = fs.existsSync(staging) ? fs.readdirSync(staging) : [];
+  assert.deepEqual(leftovers, [], 'a refused backup does not leave a staged file behind');
+});
+
+test('when the copy to the share fails, the staged copy is kept and the step is named', async () => {
+  // Let the pre-flight pass, then make the copy fail by removing the directory
+  // underneath it - the same shape as a share dropping mid-backup.
+  const vanishing = path.join(nasDir, 'vanishing');
+  fs.mkdirSync(vanishing, { recursive: true });
+  const realCopy = fs.copyFileSync;
+  fs.copyFileSync = () => { throw Object.assign(new Error("ENOENT: no such file or directory, open '/backups/x.db'"), { code: 'ENOENT' }); };
+  try {
+    const res = await backup.runBackup({ reason: 'test', dir: vanishing, allowSameDisk: true });
+    assert.equal(res.result, 'error');
+    assert.match(res.step, /copying to/);
+    assert.match(res.error, /copying to .*failed: ENOENT/);
+    assert.match(res.error, /staged copy is still at/, 'the work is not thrown away');
+  } finally {
+    fs.copyFileSync = realCopy;
+  }
+});
+
+test('the error names which step failed, not just the errno', async () => {
+  const res = await backup.runBackup({ reason: 'test', dir: '/definitely-not-here/backups' });
+  assert.equal(res.result, 'error');
+  assert.match(res.error, /does not exist/i);
+});

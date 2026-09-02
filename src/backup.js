@@ -172,40 +172,89 @@ async function doBackup({ reason = 'manual', dir = config.backup.dir, allowSameD
     return { result: 'error', error, target };
   }
 
-  const base = path.join(dir, `repairs-${stamp()}.db`);
-  try {
-    await getDb().backup(base);
-    let final = base;
-    if (config.backup.gzip) {
-      final = base + '.gz';
-      await gzipFile(base, final);
-    }
-    const bytes = fs.statSync(final).size;
-    // Read the directory back: if the file is not listed, something is shadowing
-    // the path (a mount over it, an overlay) and "success" would be a lie.
-    const listed = fs.readdirSync(dir).includes(path.basename(final));
-    if (!listed || bytes === 0) {
-      const error = `wrote ${final} but it is not readable back from ${dir} `
-        + '(is something mounted over that path?)';
-      record({ path: final, bytes, result: 'error', error, duration_ms: Date.now() - started });
-      return { result: 'error', error, path: final, target: describeTarget(dir) };
-    }
-    const removed = prune(dir, config.backup.keepDays);
-    const duration = Date.now() - started;
-    record({ path: final, bytes, result: 'ok', duration_ms: duration });
-    console.log(`[backup] ${reason}: wrote ${final} (${(bytes / 1048576).toFixed(2)} MB) in ${duration}ms, pruned ${removed}`);
-    return { result: 'ok', path: final, bytes, pruned: removed, duration_ms: duration, target: describeTarget(dir) };
-  } catch (err) {
-    // Remove both the raw copy and any half-written .gz so a partial file is
-    // never mistaken for a good backup.
-    for (const leftover of [base, base + '.gz']) {
+  // ---------------------------------------------------------------------
+  // Stage locally, then copy.
+  //
+  // SQLite's backup API writes a real database file: it creates, locks, and
+  // fsyncs. Network shares (CIFS/SMB, NFS) do not reliably support that, and the
+  // failure is rarely a clean error - you get ENOENT, a zero-byte file, or a
+  // "successful" write with nothing on the far end. So SQLite only ever writes
+  // to a local disk, and the finished, compressed file is copied to the share as
+  // plain bytes, which SMB does perfectly well.
+  // ---------------------------------------------------------------------
+  const name = `repairs-${stamp()}.db`;
+  const staging = stagingDir();
+  const localDb = path.join(staging, name);
+  let localFinal = localDb;
+  const cleanup = () => {
+    for (const leftover of [localDb, localDb + '.gz']) {
       try { if (fs.existsSync(leftover)) fs.unlinkSync(leftover); } catch { /* ignore */ }
     }
-    const error = err.message || String(err);
+  };
+
+  let step = 'preparing';
+  try {
+    step = `staging the database copy in ${staging}`;
+    fs.mkdirSync(staging, { recursive: true });
+    await getDb().backup(localDb);
+    if (!fs.existsSync(localDb) || fs.statSync(localDb).size === 0) {
+      throw new Error(`SQLite reported success but ${localDb} is missing or empty`);
+    }
+
+    if (config.backup.gzip) {
+      step = 'compressing';
+      localFinal = localDb + '.gz';
+      await gzipFile(localDb, localFinal);
+    }
+
+    step = `copying to ${dir}`;
+    const destination = path.join(dir, path.basename(localFinal));
+    fs.copyFileSync(localFinal, destination);
+
+    // Verify from the destination's point of view: size matches, and the file is
+    // actually listed in the directory (a bind mount shadowed by a later host
+    // mount would silently swallow it otherwise).
+    step = 'verifying the copy';
+    const localSize = fs.statSync(localFinal).size;
+    const remote = fs.statSync(destination);
+    const listed = fs.readdirSync(dir).includes(path.basename(destination));
+    if (!listed || remote.size !== localSize) {
+      throw new Error(
+        `copied ${localSize} bytes to ${destination} but it reads back as `
+        + `${listed ? `${remote.size} bytes` : 'missing'} - the share may have been mounted after the `
+        + 'container started, or dropped mid-write'
+      );
+    }
+
+    cleanup();
+    const removed = prune(dir, config.backup.keepDays);
+    const duration = Date.now() - started;
+    record({ path: destination, bytes: remote.size, result: 'ok', duration_ms: duration });
+    console.log(`[backup] ${reason}: wrote ${destination} (${(remote.size / 1048576).toFixed(2)} MB) in ${duration}ms, pruned ${removed}`);
+    return { result: 'ok', path: destination, bytes: remote.size, pruned: removed, duration_ms: duration, target: describeTarget(dir) };
+  } catch (err) {
+    const kept = fs.existsSync(localFinal) ? localFinal : null;
+    cleanupUnless(kept, cleanup);
+    const error = `${step} failed: ${err.message || err}`
+      + (kept ? ` (the staged copy is still at ${kept})` : '');
     record({ result: 'error', error, duration_ms: Date.now() - started });
-    console.error('[backup] failed:', error);
-    return { result: 'error', error };
+    console.error('[backup]', error);
+    return { result: 'error', error, step, target: describeTarget(dir) };
   }
+}
+
+/**
+ * Somewhere local and writable to build the backup before copying it. Next to
+ * the database by default: same volume, so it is guaranteed to be a real disk.
+ */
+function stagingDir() {
+  return config.backup.stagingDir || path.join(path.dirname(config.dbPath), '.backup-staging');
+}
+
+/** Keep a staged file when the copy step failed, so the work is not lost. */
+function cleanupUnless(kept, cleanup) {
+  if (kept) return;
+  cleanup();
 }
 
 function msUntilNextRun(now = new Date()) {

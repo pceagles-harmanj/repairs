@@ -260,7 +260,16 @@ BACKUP_KEEP_DAYS=30
 
 Every night at that time the app uses SQLite's **online backup API** (not `cp`, which can
 tear a WAL database), gzips the result to `repairs-YYYY-MM-DD_HHMMSS.db.gz`, and deletes
-backups older than the retention window. The scheduler recomputes the delay after each run,
+backups older than the retention window.
+
+**It stages locally, then copies.** SQLite's backup API creates, locks and fsyncs a real
+database file, and network shares (CIFS/SMB, NFS) do not reliably support that - the
+failures are ugly and quiet: `ENOENT`, a zero-byte file, or a "successful" write with
+nothing on the far end. So SQLite only ever writes to local disk
+(`BACKUP_STAGING_DIR`, by default a `.backup-staging` folder beside the database), and the
+finished compressed file is copied to the share as plain bytes, which SMB handles fine.
+The copy is then read back and its size compared before the run is called a success, and a
+failed copy keeps the staged file rather than throwing the work away. The scheduler recomputes the delay after each run,
 so DST changes and sleeping machines are fine, and runs never overlap.
 
 Two safety checks worth knowing about:

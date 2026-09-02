@@ -231,5 +231,9 @@ module.exports = {
     // Refuse to "back up" onto the same disk as the database (an unmounted NAS
     // path silently becomes a local folder otherwise).
     allowSameDisk: bool(process.env.BACKUP_ALLOW_SAME_DISK, false),
+    // SQLite writes here first (a real local disk), then the finished file is
+    // copied to BACKUP_DIR. Network shares cannot be trusted with SQLite's own
+    // file creation and locking.
+    stagingDir: process.env.BACKUP_STAGING_DIR || '',
   },
 };
