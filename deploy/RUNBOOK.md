@@ -270,6 +270,15 @@ Camera scanning and installability come back on managed devices. Personal phones
 will not have this, which is another argument for a certificate eventually — at
 which point set `TLS_CERT_PATH`/`TLS_KEY_PATH` and change the URLs to `https`.
 
+The scan button no longer hides itself when the camera is unavailable. Pressing
+it explains which of the three blocks is in the way — insecure origin, no camera
+API, or no built-in barcode reader — and prints the exact origin string to paste
+into the policy above. One caveat worth knowing before you chase a bug: Chrome
+ships the barcode reader on **ChromeOS, Android and macOS but not on Windows or
+Linux desktops**, so a tech on a Windows PC will get the "no built-in barcode
+reader" message even after the policy is right. Chromebooks, phones, and
+handheld scanners all work.
+
 ---
 
 ## 10. First-day checklist
@@ -290,7 +299,7 @@ which point set `TLS_CERT_PATH`/`TLS_KEY_PATH` and change the URLs to `https`.
 ## The second campus, and surviving a dead host
 
 Both are in **[NETWORK-HA.md](NETWORK-HA.md)**: a WireGuard site-to-site tunnel so
-campus B reaches this one server (config templates and a setup script live in
+GS reaches this one server (config templates and a setup script live in
 `deploy/wireguard/`), and a Proxmox HA plan for when a second host exists.
 
 ## Day-to-day

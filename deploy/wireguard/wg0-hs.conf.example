@@ -1,0 +1,34 @@
+# /etc/wireguard/wg0.conf  --  HS (the campus that hosts the repairs server)
+#
+# This side listens. It needs UDP 51820 forwarded to it on the Cipafilter; GS
+# dials in. WireGuard never answers a packet without a valid key, so that open
+# port reads as closed to a scanner.
+#
+# Fill in:
+#   <HS_PRIVATE_KEY>  from `wg genkey` on this box (keep it 600 root:root)
+#   <GS_PUBLIC_KEY>   the public key GS prints during setup
+#   <PSK>             from `wg genpsk` - the same string on both sides
+#
+# Networks (already set to yours):
+#   HS LAN  192.168.10.0/24
+#   GS LAN  192.168.168.0/24
+#   tunnel  10.99.0.0/30   <- only lives inside the tunnel, touches no LAN
+
+[Interface]
+Address    = 10.99.0.1/30
+ListenPort = 51820
+PrivateKey = <HS_PRIVATE_KEY>
+MTU        = 1420
+
+# Let traffic cross between the tunnel and the LAN. Kept in the config so the
+# routing dies with the tunnel rather than lingering after `wg-quick down`.
+PostUp   = sysctl -w net.ipv4.ip_forward=1
+PostUp   = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT
+
+[Peer]
+# GS
+PublicKey           = <GS_PUBLIC_KEY>
+PresharedKey        = <PSK>
+AllowedIPs          = 10.99.0.2/32, 192.168.168.0/24
+PersistentKeepalive = 25

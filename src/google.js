@@ -304,6 +304,17 @@ function classifyMatch(term, d) {
   return 'other';
 }
 
+/** Milliseconds since epoch for a sync timestamp, or 0 when Google gave us none. */
+function syncedAt(device) {
+  const t = device && device.last_sync ? Date.parse(device.last_sync) : NaN;
+  return Number.isFinite(t) ? t : 0;
+}
+
+/** Most recently synced first - the device someone is actually holding. */
+function byNewestSync(a, b) {
+  return syncedAt(b) - syncedAt(a);
+}
+
 function rankDevices(term, devices) {
   return devices
     .map((d) => {
@@ -311,9 +322,13 @@ function rankDevices(term, devices) {
       return { ...d, match, exact: match === 'exact_asset_tag' || match === 'exact_serial' };
     })
     .sort((a, b) => {
+      // Match quality still wins: typing "24-1" must not bury 24-1 under a
+      // freshly-synced 24-111. Newest-first only orders within a match class.
       const byMatch = MATCH_ORDER[a.match] - MATCH_ORDER[b.match];
       if (byMatch !== 0) return byMatch;
-      // then shortest asset tag first: 24-1 before 24-111
+      const bySync = byNewestSync(a, b);
+      if (bySync !== 0) return bySync;
+      // Then shortest asset tag first: 24-1 before 24-111.
       const al = (a.asset_tag || a.serial || '').length;
       const bl = (b.asset_tag || b.serial || '').length;
       if (al !== bl) return al - bl;
@@ -484,10 +499,13 @@ function isLoaner(device) {
 }
 
 async function listOrgUnitPage(query, maxResults = 50) {
-  // No orderBy: asset tags are not a sortable field in this API, and we rank the
-  // results ourselves anyway (exact tag first - see rankDevices).
+  // Asset tags are not a sortable field in this API, so sort by last sync and
+  // let rankDevices put exact tag matches on top afterwards.
   const res = await directory().chromeosdevices.list(
-    deviceListParams({ query, orgUnitPath: config.loaner.orgUnit, maxResults })
+    deviceListParams({
+      query, orgUnitPath: config.loaner.orgUnit, maxResults,
+      orderBy: 'lastSync', sortOrder: 'DESCENDING',
+    })
   );
   return (res.data.chromeosdevices || []).map(normalizeDevice);
 }
@@ -524,7 +542,8 @@ async function searchLoaners(term, { limit = 25 } = {}) {
 async function loanerPool({ limit = 60 } = {}) {
   const devices = await listOrgUnitPage(null, limit);
   for (const d of devices) cacheDevice(d);
-  return devices.map((d) => ({ ...d, is_loaner: true }));
+  // No search term here, so newest sync is the only useful order.
+  return devices.sort(byNewestSync).map((d) => ({ ...d, is_loaner: true }));
 }
 
 // --- notes write-back --------------------------------------------------------
@@ -707,6 +726,8 @@ module.exports = {
   getDevice,
   searchDevices,
   rankDevices,
+  byNewestSync,
+  syncedAt,
   classifyMatch,
   recentDevices,
   updateDeviceAnnotations,

@@ -1,0 +1,28 @@
+# /etc/wireguard/wg0.conf  --  GS (the campus that reaches across)
+#
+# This side dials out, so GS needs no port forward and no inbound firewall rule
+# at all - only HS does. If HS's public IP is dynamic, put a hostname in
+# Endpoint; WireGuard re-resolves it only when the interface comes up, so add a
+# nightly `systemctl restart wg-quick@wg0` if the ISP moves you around.
+
+[Interface]
+Address    = 10.99.0.2/30
+PrivateKey = <GS_PRIVATE_KEY>
+MTU        = 1420
+
+PostUp   = sysctl -w net.ipv4.ip_forward=1
+PostUp   = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT
+
+[Peer]
+# HS
+PublicKey           = <HS_PUBLIC_KEY>
+PresharedKey        = <PSK>
+Endpoint            = <HS_PUBLIC_IP_OR_HOSTNAME>:51820
+# Only the repairs server crosses the tunnel. AllowedIPs is both a routing rule
+# and an inbound filter, so GS will not route anything else in, and will drop
+# anything arriving from an HS address that is not on this list.
+AllowedIPs          = 10.99.0.1/32, 192.168.10.60/32
+# Widen to the whole HS LAN only if you later need more than the repairs server:
+# AllowedIPs        = 10.99.0.1/32, 192.168.10.0/24
+PersistentKeepalive = 25

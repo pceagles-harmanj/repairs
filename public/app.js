@@ -98,8 +98,71 @@ const cleanScan = (v) =>
     .replace(/\s+/g, ' ')
     .trim();
 
-const cameraScanSupported = () =>
-  typeof window.BarcodeDetector === 'function' && Boolean(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+/**
+ * Why the camera might not be available. This used to be a single boolean, and
+ * when it went false the scan button simply vanished with no explanation - which
+ * is exactly what happened when the app moved to plain http, because browsers
+ * hide navigator.mediaDevices entirely outside a secure context. Now the button
+ * always appears and says what is wrong when you press it.
+ */
+function cameraScanSupport() {
+  if (typeof window.isSecureContext === 'boolean' && !window.isSecureContext) {
+    return { ok: false, reason: 'insecure' };
+  }
+  if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) {
+    return { ok: false, reason: 'no_camera_api' };
+  }
+  if (typeof window.BarcodeDetector !== 'function') {
+    return { ok: false, reason: 'no_detector' };
+  }
+  return { ok: true, reason: null };
+}
+
+const cameraScanSupported = () => cameraScanSupport().ok;
+
+// Each of these ends with something the person can actually do next.
+const SCAN_HELP = {
+  insecure: {
+    title: 'The browser is blocking the camera on this page',
+    body: `Chrome only hands out the camera on a secure page, and this app runs on plain
+      http inside your network. Nothing is wrong with the app - the camera is simply
+      not offered to it.
+      <p><b>To turn it on for your fleet</b> (Google Admin &rarr; Devices &rarr; Chrome &rarr;
+      Settings &rarr; Users &amp; browsers), set the policy
+      <code>OverrideSecurityRestrictionsOnInsecureOrigin</code> to include this origin:</p>
+      <p><code id="scan-origin"></code></p>
+      <p class="small muted">To try it on one machine first, paste
+      <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code> into the address
+      bar, add that same origin, and restart Chrome.</p>
+      <p>Until then, a handheld scanner works everywhere - it just types the code and
+      presses Enter, so any of these boxes will take it.</p>`,
+  },
+  no_camera_api: {
+    title: 'This browser will not give the page a camera',
+    body: `The camera API is missing. That usually means the browser is old, the device has
+      no camera, or camera access is switched off in policy.
+      <p>A handheld scanner works regardless - it behaves like a keyboard.</p>`,
+  },
+  no_detector: {
+    title: 'This browser has no built-in barcode reader',
+    body: `Chrome ships the barcode reader on ChromeOS, Android and macOS, but not on
+      Windows or Linux desktops, so there is nothing here to decode the picture.
+      <p>Scanning from a Chromebook or a phone works, and a handheld scanner works
+      everywhere.</p>`,
+  },
+};
+
+/** Explain the block, with the origin filled in, instead of a dead button. */
+function showScanHelp(reason) {
+  const help = SCAN_HELP[reason] || SCAN_HELP.no_camera_api;
+  const panel = subOverlay(`<div class="modal" style="width:min(560px,calc(100% - 32px))">
+    <header><h2>${esc(help.title)}</h2><div style="flex:1"></div>
+      <button class="btn ghost sm" data-x="scan-help-close">Close</button></header>
+    <div class="body">${help.body}</div></div>`);
+  const origin = $('#scan-origin', panel.node);
+  if (origin) origin.textContent = window.location.origin;
+  $('[data-x=scan-help-close]', panel.node).addEventListener('click', panel.close);
+}
 
 /** Wire an input for scanner use: clean on input, Enter fires onScan. */
 function attachScanner(input, onScan) {
@@ -118,7 +181,7 @@ function attachScanner(input, onScan) {
 
 /** Put a camera button next to an existing input, without touching the markup. */
 function addScanButton(input, onResult) {
-  if (!input || !cameraScanSupported() || input.dataset.scanReady) return;
+  if (!input || input.dataset.scanReady) return;
   input.dataset.scanReady = '1';
   const wrap = document.createElement('div');
   wrap.className = 'scan-wrap';
@@ -142,10 +205,8 @@ const scanButtonHtml = (id, title = 'Scan a barcode with the camera') =>
 
 /** Camera scanner in a modal. Resolves through onResult with the decoded text. */
 async function openCameraScanner(onResult) {
-  if (!cameraScanSupported()) {
-    toast('This browser has no built-in barcode scanner - use a handheld scanner or type the tag', true);
-    return;
-  }
+  const support = cameraScanSupport();
+  if (!support.ok) return showScanHelp(support.reason);
   const panel = subOverlay(`<div class="modal" style="width:min(520px,calc(100% - 32px))">
     <header><h2>Scan an asset tag</h2><div style="flex:1"></div>
       <button class="btn ghost sm" data-x="scan-close">Cancel</button></header>
@@ -166,7 +227,11 @@ async function openCameraScanner(onResult) {
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
   } catch (err) {
-    $('#scan-hint', panel.node).innerHTML = `<span style="color:var(--danger)">Could not open the camera: ${esc(err.message)}</span>`;
+    const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
+    $('#scan-hint', panel.node).innerHTML = denied
+      ? `<span style="color:var(--danger)">Camera access was refused.</span> Allow it for this site
+         via the camera icon in the address bar, then press the scan button again.`
+      : `<span style="color:var(--danger)">Could not open the camera: ${esc(err.message)}</span>`;
     return;
   }
 
@@ -987,7 +1052,9 @@ function deviceKv(d) {
     <dt>Org unit</dt><dd class="small">${esc(d.org_unit || '-')}</dd>
     <dt>Location</dt><dd>${esc(d.annotated_location || '-')}</dd>
     <dt>Notes</dt><dd style="white-space:pre-wrap">${esc(d.notes || '-')}</dd>
-    <dt>Last sync</dt><dd class="small">${esc(fullTime(d.last_sync))}</dd>
+    <dt>Last policy sync</dt><dd class="small">${d.last_sync
+      ? `${esc(fullTime(d.last_sync))} <span class="muted"${syncAge(d.last_sync).stale ? ' style="color:var(--warn);font-weight:600"' : ''}>(${esc(syncAge(d.last_sync).text)})</span>`
+      : '<span class="muted">never</span>'}</dd>
     <dt>OS version</dt><dd class="small">${esc(d.os_version || '-')}</dd>
     <dt>Auto-update expires</dt><dd class="small">${esc(d.auto_update_expiration ? new Date(Number(d.auto_update_expiration)).toLocaleDateString() : '-')}</dd>
     <dt>Cached</dt><dd class="small muted">${esc(relTime(d.cached_at))}${d.stale ? ' (Google lookup failed, showing cache)' : ''}</dd>
@@ -1194,14 +1261,34 @@ const MATCH_LABELS = {
   other: '',
 };
 
-const deviceHitHtml = (d) => `<div class="hit" data-id="${esc(d.device_id)}">
+/**
+ * How long since the device last checked in with Google. A machine that has not
+ * synced in weeks is usually in a drawer, off, or wiped - worth seeing at a
+ * glance when two tags look alike.
+ */
+const SYNC_STALE_DAYS = 14;
+
+function syncAge(iso) {
+  if (!iso) return { text: 'never synced', stale: true, ever: false };
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return { text: 'never synced', stale: true, ever: false };
+  const days = (Date.now() - then) / 86400000;
+  return { text: relTime(iso), stale: days > SYNC_STALE_DAYS, ever: true };
+}
+
+const deviceHitHtml = (d) => {
+  const sync = syncAge(d.last_sync);
+  return `<div class="hit" data-id="${esc(d.device_id)}">
   <div class="grow">
     <div><b class="mono">${esc(d.serial || '(no serial)')}</b>${d.asset_tag ? ` &middot; asset ${esc(d.asset_tag)}` : ''}
       ${d.match && MATCH_LABELS[d.match] ? `<span class="pill" style="background:${d.exact ? 'var(--ok)' : 'var(--border)'};color:${d.exact ? '#fff' : 'var(--muted)'};margin-left:6px">${esc(MATCH_LABELS[d.match])}</span>` : ''}</div>
     <div class="small muted">${esc(d.model || '')} &middot; ${esc(d.most_recent_user || 'no recent user')} &middot; ${esc(d.org_unit || '')}</div>
+    <div class="small muted">${sync.ever ? 'synced ' : ''}<span${sync.stale ? ' style="color:var(--warn);font-weight:600"' : ''}>${esc(sync.text)}</span>
+      ${d.os_version ? ` &middot; ChromeOS ${esc(d.os_version)}` : ''}</div>
   </div>
   <div class="small muted">${esc(d.status || '')}</div>
 </div>`;
+};
 
 /**
  * Google matches asset tags by prefix, so "24-1" also returns 24-111. Show the
@@ -1247,7 +1334,10 @@ async function loadRecentDevices() {
 function renderDeviceHits(devices) {
   const hits = $('#device-hits');
   if (!devices.length) { hits.innerHTML = '<p class="small muted">No devices matched.</p>'; return; }
-  hits.innerHTML = deviceHitsHtml(devices);
+  hits.innerHTML =
+    (devices.length > 1
+      ? '<p class="small muted" style="margin:0 0 8px">Best match first, then most recently synced.</p>'
+      : '') + deviceHitsHtml(devices);
   $$('.hit', hits).forEach((el) =>
     el.addEventListener('click', () => showDevice(devices.find((d) => d.device_id === el.dataset.id)))
   );
