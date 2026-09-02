@@ -107,6 +107,18 @@ shows up as a failed backup in Settings rather than a silent non-backup.
 
 ---
 
+> **Mount the share BEFORE you start the container.** A bind mount is resolved
+> once, when the container starts. If you mount the NAS on the host afterwards,
+> the container keeps writing into the empty directory that was there at start
+> time — the host then hides it under the new mount, so the app reports success
+> and the files are nowhere. After any mount change:
+> `docker compose -f deploy/docker-compose.prod.yml up -d --force-recreate`.
+>
+> The app now refuses to write a "backup" that lands on its own filesystem, and
+> Settings → Nightly backup shows the target's real state (exists / writable /
+> is it a mount point / how many backup files it can see), so this fails loudly
+> rather than quietly.
+
 ## 6. Start it
 
 ```bash
@@ -285,6 +297,30 @@ docker compose -f deploy/docker-compose.prod.yml up -d --build
 # run the tests inside the image
 docker compose -f deploy/docker-compose.prod.yml exec repairs npm test
 ```
+
+**If a backup "succeeds" but nothing appears on the NAS**, check where the app
+is actually writing — from inside the container, not from the host:
+
+```bash
+cd /opt/repairs
+# what the app sees
+docker compose -f deploy/docker-compose.prod.yml exec repairs sh -lc \
+  'echo BACKUP_DIR=$BACKUP_DIR; ls -la $BACKUP_DIR; df -h $BACKUP_DIR; mount | grep -i cifs'
+# what the host sees
+ls -la /mnt/nas-repairs; mount | grep nas-repairs
+```
+
+Three things to compare:
+
+1. **`BACKUP_DIR` must be the path *inside* the container** — `/backups` with the
+   compose file as written. Setting it to the host path (`/mnt/nas-repairs`)
+   makes the app create that directory inside the container and write there,
+   which looks fine from the app and is invisible on the host.
+2. **`df` inside the container should show the NAS**, not the container's
+   overlay or root filesystem. If it shows the root filesystem, the share was
+   not mounted when the container started.
+3. **The host directory must be mounted before the container starts** (see the
+   note in step 6).
 
 **Backups.** The nightly job at 01:00 writes `repairs-YYYY-MM-DD_HHMMSS.db.gz`
 to the NAS and prunes past `BACKUP_KEEP_DAYS`. To restore: stop the app,

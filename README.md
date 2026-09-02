@@ -728,7 +728,8 @@ POST /u/<id>.<mac>/one-click   RFC 8058 one-click unsubscribe
 | `invalid ELF header` / `NODE_MODULE_VERSION` after moving the folder between machines | `rm -rf node_modules && npm install` (better-sqlite3 is a native module). In Docker this is `.dockerignore` doing its job - make sure it excludes `node_modules` |
 | Docker build dies on `node-gyp rebuild` / `find Python` | npm could not fetch a prebuilt better-sqlite3 and tried to compile in an image without a toolchain. The shipped Dockerfile is multi-stage and installs `python3 make g++` in the builder for exactly this - rebuild with the current Dockerfile |
 | Everything is slow | check that `data/repairs.db` is on local disk, not a synced folder like Drive or iCloud |
-| Backup says "same disk as the database" | the NAS share is not mounted (that is the point of the check) - mount it, or set `BACKUP_ALLOW_SAME_DISK=true` for a deliberate local copy |
+| Backup says "not a mounted share" / "same disk as the database" | the share is not mounted where the app is running - mount it and restart the container, or set `BACKUP_ALLOW_SAME_DISK=true` for a deliberate local copy |
+| Backup reports success but nothing reaches the NAS | in Docker, `BACKUP_DIR` must be the path *inside* the container (`/backups`), and the share must be mounted on the host **before** the container starts. Settings -> Nightly backup shows whether the target is a real mount point and how many files it can see |
 | Emails have no status/unsubscribe link | `PUBLIC_SITE_URL` is not set |
 | A magic link says "not valid any more" | `PUBLIC_LINK_SECRET` changed, or the ticket was deleted |
 | Google sign-in on the public page is refused | `PUBLIC_ALLOWED_DOMAINS` is empty (it fails closed) or the public origin is missing from the OAuth client's JavaScript origins |

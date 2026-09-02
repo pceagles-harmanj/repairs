@@ -71,10 +71,47 @@ test('files older than the retention window are pruned, newer ones kept', () => 
   assert.ok(fs.existsSync(unrelated), 'unrelated files are never touched');
 });
 
-test('a backup folder on the same disk as the database is refused', async () => {
+test('a backup folder that is not a mounted share is refused', async () => {
   const res = await backup.runBackup({ reason: 'test', dir: nasDir, allowSameDisk: false });
   assert.equal(res.result, 'error');
-  assert.match(res.error, /same disk|not mounted/i);
+  assert.match(res.error, /not a mounted share|same disk/i);
+  // and the diagnosis says why, in the terms an admin can act on
+  assert.equal(res.target.exists, true);
+  assert.equal(res.target.writable, true);
+  assert.equal(res.target.is_mount, false);
+  assert.ok(res.target.warning, 'writable, but not a real backup target');
+  assert.equal(res.target.problem, null, 'not a hard failure - the override exists for a reason');
+});
+
+test('the target check describes where the backup would actually land', () => {
+  const target = backup.describeTarget(nasDir);
+  assert.equal(target.dir, nasDir);
+  assert.equal(target.exists, true);
+  assert.equal(target.writable, true);
+  assert.equal(typeof target.device, 'string');
+  assert.equal(target.is_mount, false, 'a plain directory is not a mount point');
+  assert.ok(target.files >= 1, 'it can see the backups already written there');
+  assert.match(target.newest, /^repairs-/);
+
+  assert.ok(target.warning, 'a plain local directory warns that it is not a share');
+
+  const missing = backup.describeTarget('/definitely-not-here/backups');
+  assert.equal(missing.exists, false);
+  assert.match(missing.problem, /does not exist/);
+});
+
+test('a successful backup reports the target it used', async () => {
+  const res = await backup.runBackup({ reason: 'test' });
+  assert.equal(res.result, 'ok');
+  assert.equal(res.target.dir, nasDir);
+  assert.ok(res.target.files >= 1);
+  assert.ok(fs.existsSync(res.path), 'the file is really there');
+});
+
+test('status() carries the diagnosis so Settings can show it', () => {
+  const s = backup.status();
+  assert.equal(s.target.dir, nasDir);
+  assert.equal(typeof s.target.exists, 'boolean');
 });
 
 test('a missing mount point is refused instead of being created locally', async () => {

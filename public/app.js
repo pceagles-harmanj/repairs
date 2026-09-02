@@ -2153,6 +2153,17 @@ async function loadBackups() {
          &middot; ${esc(relTime(last.created_at))}${last.bytes ? ` &middot; ${(last.bytes / 1048576).toFixed(2)} MB` : ''}
          ${last.error ? `<div class="result-line err" style="margin-top:8px">${esc(last.error)}</div>` : ''}
          ${last.path ? `<div class="small muted mono">${esc(last.path)}</div>` : ''}`;
+    const t = status.target || {};
+    const targetLine = t.dir
+      ? `<div class="small muted" style="margin-top:6px">Target <span class="mono">${esc(t.dir)}</span> &middot;
+           ${t.exists ? 'exists' : '<b style="color:var(--danger)">missing</b>'} &middot;
+           ${t.writable ? 'writable' : '<b style="color:var(--danger)">not writable</b>'} &middot;
+           ${t.is_mount ? 'a mounted share' : '<b style="color:var(--warn)">not a mount point</b>'} &middot;
+           ${t.files == null ? '' : `${esc(t.files)} backup file${t.files === 1 ? '' : 's'} visible`}
+           ${t.free_mb != null ? ` &middot; ${esc((t.free_mb / 1024).toFixed(1))} GB free` : ''}</div>
+         ${t.problem ? `<div class="result-line err">${esc(t.problem)}</div>` : ''}
+         ${t.warning ? `<div class="result-line err">${esc(t.warning)}</div>` : ''}`
+      : '';
     box.innerHTML = `
       ${status.enabled
         ? `<p style="margin-top:0">Runs every day at <b>${esc(status.at)}</b> to <span class="mono">${esc(status.dir)}</span>,
@@ -2160,6 +2171,7 @@ async function loadBackups() {
            <span class="small muted">Next run ${esc(fullTime(status.next_run))}.</span></p>`
         : `<div class="result-line info">Nightly backups are off. Set <span class="mono">BACKUP_DIR</span> in
            <span class="mono">.env</span> to your NAS mount (and leave <span class="mono">BACKUP_ENABLED=true</span>).</div>`}
+      ${targetLine}
       <p style="margin-bottom:8px">${lastLine}</p>
       <button class="btn" id="backup-now">Back up now</button>
       ${history.length > 1

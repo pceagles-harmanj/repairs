@@ -22,6 +22,74 @@ function stamp(d = new Date()) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 
+/**
+ * Where does this path really live?
+ *
+ * In a container the naive checks lie: `/app/data` is itself a bind mount, so
+ * comparing devices against the database tells you nothing about whether the
+ * backup folder is the NAS or just a directory inside the container. The useful
+ * questions are "is this a mount point at all" and "is it the same filesystem
+ * as the container's own root".
+ */
+function describeTarget(dir = config.backup.dir) {
+  const info = {
+    dir: dir || null,
+    exists: false,
+    writable: false,
+    is_mount: false,
+    same_fs_as_root: null,
+    same_fs_as_database: null,
+    device: null,
+    free_mb: null,
+    files: null,
+    newest: null,
+    problem: null,   // fatal: cannot write here at all
+    warning: null,   // writable, but not a real backup target
+  };
+  if (!dir) {
+    info.problem = 'BACKUP_DIR is not set';
+    return info;
+  }
+  try {
+    const st = fs.statSync(dir);
+    info.exists = true;
+    info.device = String(st.dev);
+    // A directory whose device differs from its parent's is a mount point.
+    try {
+      info.is_mount = fs.statSync(path.dirname(dir)).dev !== st.dev;
+    } catch { /* parent unreadable: leave unknown */ }
+    try { info.same_fs_as_root = fs.statSync('/').dev === st.dev; } catch { /* ignore */ }
+    try { info.same_fs_as_database = fs.statSync(config.dbPath).dev === st.dev; } catch { /* ignore */ }
+    try { fs.accessSync(dir, fs.constants.W_OK); info.writable = true; } catch { /* ignore */ }
+    try {
+      const stats = fs.statfsSync(dir);
+      info.free_mb = Math.round((stats.bavail * stats.bsize) / 1048576);
+    } catch { /* statfs is not everywhere */ }
+    try {
+      const names = fs.readdirSync(dir).filter((n) => /^repairs-.*\.db(\.gz)?$/.test(n)).sort();
+      info.files = names.length;
+      info.newest = names.length ? names[names.length - 1] : null;
+    } catch { /* ignore */ }
+  } catch {
+    info.problem = `${dir} does not exist from where the app is running`;
+    return info;
+  }
+
+  // `problem` is fatal whatever the settings say; `warning` is the "this is not
+  // really a backup" case that BACKUP_ALLOW_SAME_DISK deliberately overrides.
+  // Reporting them separately keeps the description honest and the decision
+  // where it belongs, in doBackup().
+  if (!info.writable) {
+    info.problem = `${dir} is not writable by the app`;
+  } else if (info.same_fs_as_root) {
+    info.warning = `${dir} is on the same filesystem as the app itself, so it is not a mounted share - `
+      + 'anything written there stays inside the container and is lost with it';
+  } else if (info.same_fs_as_database) {
+    info.warning = `${dir} is on the same disk as the database, so a copy there is not a backup`;
+  }
+  return info;
+}
+
 function record(entry) {
   getDb()
     .prepare(
@@ -90,15 +158,18 @@ async function doBackup({ reason = 'manual', dir = config.backup.dir, allowSameD
     return { result: 'error', error };
   }
 
-  // A backup on the same disk as the database is not a backup.
-  if (!allowSameDisk) {
-    try {
-      if (fs.statSync(dir).dev === fs.statSync(config.dbPath).dev) {
-        const error = `${dir} is on the same disk as the database, so this would not be a real backup - the NAS share is probably not mounted. Set BACKUP_ALLOW_SAME_DISK=true if you really want a local copy.`;
-        record({ result: 'error', error });
-        return { result: 'error', error };
-      }
-    } catch { /* if we cannot tell, carry on and write the backup */ }
+  // Is this really the share, or just a directory that happens to exist?
+  const target = describeTarget(dir);
+  if (target.problem) {
+    record({ result: 'error', error: target.problem });
+    return { result: 'error', error: target.problem, target };
+  }
+  if (target.warning && !allowSameDisk) {
+    const error = `${target.warning}. Mount the share and restart the container `
+      + '(a mount made on the host after the container started is not visible inside it), '
+      + 'or set BACKUP_ALLOW_SAME_DISK=true if a local copy really is what you want.';
+    record({ result: 'error', error });
+    return { result: 'error', error, target };
   }
 
   const base = path.join(dir, `repairs-${stamp()}.db`);
@@ -110,11 +181,20 @@ async function doBackup({ reason = 'manual', dir = config.backup.dir, allowSameD
       await gzipFile(base, final);
     }
     const bytes = fs.statSync(final).size;
+    // Read the directory back: if the file is not listed, something is shadowing
+    // the path (a mount over it, an overlay) and "success" would be a lie.
+    const listed = fs.readdirSync(dir).includes(path.basename(final));
+    if (!listed || bytes === 0) {
+      const error = `wrote ${final} but it is not readable back from ${dir} `
+        + '(is something mounted over that path?)';
+      record({ path: final, bytes, result: 'error', error, duration_ms: Date.now() - started });
+      return { result: 'error', error, path: final, target: describeTarget(dir) };
+    }
     const removed = prune(dir, config.backup.keepDays);
     const duration = Date.now() - started;
     record({ path: final, bytes, result: 'ok', duration_ms: duration });
     console.log(`[backup] ${reason}: wrote ${final} (${(bytes / 1048576).toFixed(2)} MB) in ${duration}ms, pruned ${removed}`);
-    return { result: 'ok', path: final, bytes, pruned: removed, duration_ms: duration };
+    return { result: 'ok', path: final, bytes, pruned: removed, duration_ms: duration, target: describeTarget(dir) };
   } catch (err) {
     // Remove both the raw copy and any half-written .gz so a partial file is
     // never mistaken for a good backup.
@@ -177,6 +257,7 @@ function status() {
   return {
     enabled: config.backup.enabled && Boolean(config.backup.dir),
     dir: config.backup.dir,
+    target: describeTarget(),
     at: `${pad(config.backup.hour)}:${pad(config.backup.minute)}`,
     keep_days: config.backup.keepDays,
     gzip: config.backup.gzip,
@@ -186,4 +267,6 @@ function status() {
   };
 }
 
-module.exports = { runBackup, startScheduler, stopScheduler, msUntilNextRun, history, status, prune, stamp };
+module.exports = {
+  runBackup, startScheduler, stopScheduler, msUntilNextRun, history, status, prune, stamp, describeTarget,
+};
