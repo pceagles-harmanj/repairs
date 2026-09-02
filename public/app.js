@@ -2211,6 +2211,11 @@ function renderPublicSitePanel() {
     ? `<p style="margin-top:0">Serving on port <b>${esc(ps.port)}</b>, published as
        <a href="${esc(ps.url)}" target="_blank" rel="noreferrer">${esc(ps.url)}</a>.
        Google sign-in ${ps.google_signin ? 'enabled' : 'off'} &middot; asset tag lookup ${ps.allow_lookup ? 'enabled' : 'off'}.</p>
+       ${ps.google_signin
+         ? `<p class="small muted" style="margin:0 0 8px">Sign-in sends students to Google and back to
+            <span class="mono">${esc(ps.google_signin_redirect_uri)}</span> &mdash; that exact string must be an
+            Authorized redirect URI on the OAuth client.</p>`
+         : `<div class="result-line info">Student Google sign-in is off: ${esc(ps.google_signin_blocked_by || 'not configured')}.</div>`}
        <p class="small muted" style="margin-bottom:0">Status and preference links are included in every email.
        To embed in Google Sites, insert an Embed &rarr; By URL pointing at ${esc(ps.url)}.</p>`
     : `<div class="result-line info">Running on port ${esc(ps.port)}, but <span class="mono">PUBLIC_SITE_URL</span> is not set,

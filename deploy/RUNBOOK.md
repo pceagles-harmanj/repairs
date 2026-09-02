@@ -220,8 +220,13 @@ conditional forwarder for `internal.pceagles.org`).
 **Google Cloud console → Credentials → your Web client:**
 
 - Authorized redirect URIs: `http://repairs.internal.pceagles.org:8080/oauth2/callback`
-- Authorized JavaScript origins (only if you want student Google sign-in on the
-  status site): `http://repairs.internal.pceagles.org:8081`
+- Authorized redirect URIs (student sign-in on the status site):
+  `http://repairs.internal.pceagles.org/auth/google/callback`
+  (add the port if the site is not on 80, e.g. `...:8081/auth/google/callback`)
+
+Do **not** bother with Authorized JavaScript origins: the status site uses the
+redirect flow, not Google's rendered button. The button needs https and Google
+rejects http origins outright, which is why an internal site cannot use it.
 
 Then open the app, **Settings → Connect Google**, and sign in with the admin
 account. `npm run check-oauth` (or `docker compose exec repairs npm run

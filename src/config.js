@@ -1,6 +1,8 @@
 'use strict';
 const path = require('path');
-require('dotenv').config();
+// Tests set SKIP_DOTENV=1: a suite that reads the developer's own .env is not
+// testing anything reliable, and this has produced three false failures already.
+if (!process.env.SKIP_DOTENV) require('dotenv').config();
 
 const bool = (v, dflt = false) => {
   if (v === undefined || v === null || v === '') return dflt;
@@ -130,6 +132,16 @@ module.exports = {
     // Usually the same OAuth client as above, with the public origin added under
     // "Authorized JavaScript origins". Blank = sign-in button hidden.
     googleClientId: process.env.PUBLIC_GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || '',
+    // Student sign-in uses the ordinary redirect flow, which needs a client
+    // secret as well. Both default to the same Workspace OAuth client as the
+    // tech app - only set them for a separate client.
+    oauthClientId: process.env.PUBLIC_OAUTH_CLIENT_ID || process.env.PUBLIC_GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || '',
+    oauthClientSecret: process.env.PUBLIC_OAUTH_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET || '',
+    // Where Google sends students back. Defaults to PUBLIC_SITE_URL +
+    // /auth/google/callback; set it explicitly when the address students use is
+    // not the address Google should return them to (a proxy, a different port,
+    // or simply the string you already registered).
+    oauthRedirectUri: normalizeUrl(process.env.PUBLIC_OAUTH_REDIRECT_URI, 'PUBLIC_OAUTH_REDIRECT_URI', { defaultScheme: 'http' }),
     // Only accept sign-ins from these email domains (comma separated).
     allowedDomains: String(process.env.PUBLIC_ALLOWED_DOMAINS || '')
       .split(',').map((d) => d.trim().toLowerCase()).filter(Boolean),

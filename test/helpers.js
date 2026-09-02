@@ -5,6 +5,18 @@ const path = require('path');
 
 /** Point config at a throwaway DB and keep email in dry-run before anything loads. */
 function isolate() {
+  // Hermetic: never read the developer's .env, and start from a known-empty
+  // configuration so a value in someone's local file cannot change a result.
+  process.env.SKIP_DOTENV = '1';
+  for (const key of [
+    'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'PUBLIC_GOOGLE_CLIENT_ID',
+    'PUBLIC_OAUTH_CLIENT_ID', 'PUBLIC_OAUTH_CLIENT_SECRET', 'PUBLIC_OAUTH_REDIRECT_URI',
+    'PUBLIC_SITE_URL', 'PUBLIC_ALLOWED_DOMAINS', 'OAUTH_REDIRECT_URI', 'PUBLIC_URL',
+    'LOANER_DIGEST_TO', 'SCHOOL_HOLIDAYS', 'TRACKING_PROVIDER', 'TRACKING_API_KEY',
+    'BACKUP_DIR', 'BACKUP_STAGING_DIR', 'APP_PASSWORD', 'SESSION_SECRET', 'ORG_NAME',
+  ]) {
+    delete process.env[key];
+  }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'repairs-test-'));
   process.env.DB_PATH = path.join(dir, 'test.db');
   process.env.DRY_RUN_EMAIL = 'true';
@@ -12,9 +24,6 @@ function isolate() {
   process.env.GOOGLE_CLIENT_ID = '';
   process.env.GOOGLE_CLIENT_SECRET = '';
   process.env.ALLOW_DEVICE_WRITEBACK = 'true';
-  // Keep the developer's .env from leaking into assertions.
-  process.env.LOANER_DIGEST_TO = process.env.LOANER_DIGEST_TO || '';
-  process.env.SCHOOL_HOLIDAYS = process.env.SCHOOL_HOLIDAYS || '';
   return dir;
 }
 

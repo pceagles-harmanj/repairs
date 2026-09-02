@@ -208,10 +208,21 @@ Three ways a user gets in:
 
 1. **Magic link** - every email carries `/t/<id>.<hmac>`, unguessable and specific to one
    ticket. This is the path to encourage; nothing to remember, works from any network.
-2. **Google sign-in** - shows every ticket for that Google account. Requires
-   `PUBLIC_GOOGLE_CLIENT_ID` *and* `PUBLIC_ALLOWED_DOMAINS` (it fails closed if the domain
-   list is empty, so a stranger's Google account cannot sign in). Google's script does not
-   work inside an iframe, so on an embedded page users get the lookup form instead.
+2. **Google sign-in** - shows every ticket for that Google account. It uses the ordinary
+   OAuth **redirect flow** (a link to Google and back), not Google's rendered "Sign in with
+   Google" button: that button needs a secure context, and Google will not accept an
+   `http://` address as an Authorized JavaScript origin at all, so it cannot work on an
+   internal plain-http site. The redirect flow works on both http and https and needs only
+   an Authorized **redirect URI**:
+
+   ```
+   <PUBLIC_SITE_URL>/auth/google/callback
+   ```
+
+   Add that to the same OAuth client, set `PUBLIC_ALLOWED_DOMAINS` (it fails closed when
+   empty, so a stranger's Google account cannot sign in), and the button appears. Settings
+   -> Public status site prints the exact string to paste. The client secret is needed for
+   the exchange; it defaults to the same client the tech app uses.
 3. **Asset tag + email** - both must match the same ticket, rate limited per source
    address. Turn it off with `PUBLIC_ALLOW_LOOKUP=false` if you would rather only use
    magic links.
@@ -536,7 +547,9 @@ cannot spam anybody.
 | `PUBLIC_SITE_ENABLED` | `true` | set `false` to run without the user-facing site |
 | `PUBLIC_SITE_PORT` / `PUBLIC_SITE_HOST` | `8081` / `0.0.0.0` | the only port meant to be exposed |
 | `PUBLIC_SITE_URL` | empty | the address users see; **required** for status/unsubscribe links in emails |
-| `PUBLIC_GOOGLE_CLIENT_ID` | falls back to `GOOGLE_CLIENT_ID` | Google sign-in on the public page |
+| `PUBLIC_OAUTH_CLIENT_ID` / `_SECRET` | fall back to `GOOGLE_CLIENT_ID` / `_SECRET` | student sign-in; blank reuses the tech app's client |
+| `PUBLIC_OAUTH_REDIRECT_URI` | `PUBLIC_SITE_URL` + `/auth/google/callback` | pin the exact string registered with Google |
+| `PUBLIC_GOOGLE_CLIENT_ID` | falls back to `GOOGLE_CLIENT_ID` | deprecated alias for `PUBLIC_OAUTH_CLIENT_ID` |
 | `PUBLIC_ALLOWED_DOMAINS` | empty | comma separated; **empty disables sign-in entirely** |
 | `PUBLIC_ALLOW_LOOKUP` | `true` | the asset tag + email form |
 | `PUBLIC_TRUST_PROXY` | `false` | only true behind a proxy you control |

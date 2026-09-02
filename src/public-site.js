@@ -20,6 +20,7 @@ const config = require('./config');
 const { getDb } = require('./db');
 const links = require('./lib/links');
 const subscriptions = require('./subscriptions');
+const publicAuth = require('./public-auth');
 const { STATUSES, statusLabel } = require('./lib/statuses');
 
 const esc = (v) =>
@@ -253,14 +254,14 @@ function notFoundPage(what = 'That link is not valid any more.') {
 }
 
 function homePage({ error, signedInAs, tickets } = {}) {
-  const gis = config.publicSite.googleClientId && config.publicSite.allowedDomains.length
+  // A link, not Google's rendered button: the button needs a secure context and
+  // an https JavaScript origin, neither of which an internal http site has.
+  // The redirect flow behind this link works on both.
+  const gis = publicAuth.available()
     ? `<div class="card">
         <h2>Sign in with your school account</h2>
-        <p class="sub" style="margin:0 0 12px">See every repair for your account.</p>
-        <div id="g_id_onload" data-client_id="${esc(config.publicSite.googleClientId)}"
-             data-login_uri="${esc((config.publicSite.url || '') + '/signin')}" data-ux_mode="redirect"></div>
-        <div class="g_id_signin" data-type="standard" data-size="large" data-text="signin_with"></div>
-        <p class="sub" style="margin:12px 0 0">If the button does not appear, open this page in its own tab.</p>
+        <p class="sub" style="margin:0 0 12px">See every repair filed for your account.</p>
+        <a href="/auth/google"><button type="button">Sign in with Google</button></a>
       </div>`
     : '';
   const lookup = config.publicSite.allowLookup
@@ -296,9 +297,7 @@ function homePage({ error, signedInAs, tickets } = {}) {
     ${list}${empty}${gis}${lookup}
     <div class="card"><p class="note" style="margin:0">The quickest way in is the link at the bottom of any
     repair email we send you - it opens your ticket directly.</p></div>`,
-    config.publicSite.googleClientId && config.publicSite.allowedDomains.length
-      ? { extraHead: '<script src="https://accounts.google.com/gsi/client" async defer></script>' }
-      : {});
+    {});
 }
 
 // ---------------------------------------------------------------- data access
@@ -577,6 +576,46 @@ function createPublicApp() {
     res.send(homePage({ tickets, signedInAs: String(email).toLowerCase() }));
   });
 
+  // Student sign-in: send them to Google...
+  app.get('/auth/google', rateLimit({ max: 30, name: 'signin' }), (req, res) => {
+    if (!publicAuth.available()) {
+      return res.status(503).send(homePage({ error: `Google sign-in is not set up: ${publicAuth.why()}.` }));
+    }
+    const state = publicAuth.issueState(res, '/');
+    res.redirect(publicAuth.authUrl(state));
+  });
+
+  // ...and take them back afterwards.
+  app.get(publicAuth.CALLBACK_PATH, rateLimit({ max: 30, name: 'signin' }), async (req, res) => {
+    const { code, state, error } = req.query;
+    const expected = publicAuth.readState(req, state === undefined ? '' : String(state));
+    publicAuth.clearState(res);
+
+    if (error) {
+      return res.status(400).send(homePage({ error: 'Sign-in was cancelled.' }));
+    }
+    if (!expected) {
+      return res.status(400).send(homePage({ error: 'That sign-in attempt expired. Try again from this page.' }));
+    }
+    if (!code) {
+      return res.status(400).send(homePage({ error: 'Google did not return a sign-in code. Try again.' }));
+    }
+
+    try {
+      const identity = await publicAuth.exchangeCode(String(code));
+      if (!publicAuth.domainAllowed(identity)) {
+        return res.status(403).send(homePage({ error: 'That account is not part of this organization.' }));
+      }
+      issuePublicSession(res, identity.email);
+      res.redirect(expected.returnTo || '/');
+    } catch (err) {
+      // Never echo Google/library detail onto a public page.
+      console.error('[public site] student sign-in failed:', err.message);
+      res.status(401).send(homePage({ error: 'We could not complete that sign-in. Try again, or use the link in your repair email.' }));
+    }
+  });
+
+  // Legacy: the GIS button posts here when the site is served over https.
   // Google sign-in (Google Identity Services posts here)
   app.post('/signin', rateLimit({ max: 20, name: 'signin' }), async (req, res) => {
     const { credential, g_csrf_token: bodyToken } = req.body || {};

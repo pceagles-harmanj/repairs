@@ -64,6 +64,7 @@ line();
 
 // ---- 3. public site ----
 line('3. Public status site');
+const publicAuth = require('../src/public-auth');
 if (!config.publicSite.enabled) warn('PUBLIC_SITE_ENABLED=false - no user-facing site');
 else if (!config.publicSite.url) warn('PUBLIC_SITE_URL is empty - emails will have no status/unsubscribe links');
 else {
@@ -81,12 +82,21 @@ else {
   if (siteUrl.hostname === new URL(config.publicUrl).hostname && siteUrl.port === new URL(config.publicUrl).port) {
     bad('PUBLIC_SITE_URL and PUBLIC_URL are the same address - the tech app and the public site are two different listeners and need different hostnames or ports');
   }
-  if (config.publicSite.googleClientId && !config.publicSite.allowedDomains.length) {
-    warn('PUBLIC_ALLOWED_DOMAINS is empty, so Google sign-in on the public page is disabled (fails closed)');
-  } else if (config.publicSite.googleClientId) {
-    ok(`Google sign-in allowed for: ${config.publicSite.allowedDomains.join(', ')}`);
-    line(`      Add this to the OAuth client's "Authorized JavaScript origins": ${new URL(config.publicSite.url).origin}`);
+  line();
+  line('   Student sign-in (the redirect flow - no JavaScript origins needed):');
+  if (publicAuth.available()) {
+    ok(`allowed for: ${config.publicSite.allowedDomains.join(', ')}`);
+  } else {
+    warn(`off - ${publicAuth.why()}`);
   }
+  line();
+  line('   Add this to the SAME OAuth client under "Authorized redirect URIs":');
+  line();
+  line(`       ${publicAuth.redirectUri() || '(set PUBLIC_SITE_URL first)'}`);
+  line();
+  line('   Google\'s rendered "Sign in with Google" button is NOT used: it needs a');
+  line('   secure context and an https JavaScript origin, so it cannot work on an');
+  line('   internal http site. The redirect flow above works on http and https.');
 }
 line();
 
