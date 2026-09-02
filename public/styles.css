@@ -44,6 +44,12 @@ header.topbar {
   border-bottom: 4px solid var(--brand-accent);
 }
 .brand { font-weight: 650; letter-spacing: -.01em; display: flex; align-items: center; gap: 8px; color: #fff; }
+/* Same reason as the public site: a white disc so the maroon eagle is visible
+   against the maroon header. */
+.brand .crest {
+  height: 34px; width: 34px; display: block; background: #fff; border-radius: 50%;
+  padding: 3px; object-fit: contain; box-shadow: 0 1px 2px rgba(0, 0, 0, .25);
+}
 .brand .dot { width: 10px; height: 10px; border-radius: 3px; background: var(--brand-accent); }
 header.topbar nav.tabs button { color: rgba(255, 255, 255, .78); }
 header.topbar nav.tabs button:hover { background: rgba(255, 255, 255, .12); color: #fff; }
@@ -261,6 +267,7 @@ tbody tr.clickable:hover { background: var(--panel-2); }
     padding-top: max(10px, env(safe-area-inset-top));
   }
   .brand { order: 0; flex: 1 1 auto; }
+  .brand .crest { height: 28px; width: 28px; }
   #new-ticket-btn { order: 1; }
   /* Share one row and truncate rather than each taking a full line. */
   #gstate, #dry-run-badge {

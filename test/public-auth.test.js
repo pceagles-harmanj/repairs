@@ -199,3 +199,72 @@ test('the client id and secret fall back to the tech app\'s OAuth client', () =>
   }
   assert.equal(publicAuth.available(), true);
 });
+
+// ---- what the page shows once you are signed in ----------------------------
+
+const signIn = async (email) => {
+  const real = publicAuth.exchangeCode;
+  publicAuth.exchangeCode = async () => ({ email, name: 'Test User', hd: 'example.org' });
+  try {
+    const start = await get('/auth/google');
+    const state = new URL(start.headers.get('location')).searchParams.get('state');
+    const cookie = cookieFrom(start, publicAuth.STATE_COOKIE);
+    const res = await get(`/auth/google/callback?code=good&state=${encodeURIComponent(state)}`, { cookie });
+    return cookieFrom(res, 'repairs_user');
+  } finally {
+    publicAuth.exchangeCode = real;
+  }
+};
+
+test('signed in with no repairs: sign-in and lookup are hidden, guidance is not', async () => {
+  const session = await signIn('nobody@example.org');
+  const html = await (await get('/', { cookie: session })).text();
+
+  assert.ok(!/Sign in with Google/.test(html), 'the sign-in card is gone');
+  assert.ok(!/<form method="post" action="\/lookup"/.test(html), 'the lookup form is gone');
+  assert.match(html, /No repairs on your account/);
+  assert.match(html, /check your email/i, 'points at the emailed link');
+  assert.match(html, /Look up a repair<\/button>/, 'offers the lookup as a button');
+  assert.match(html, /nobody@example\.org/);
+  assert.match(html, /sign out/);
+});
+
+test('the lookup form can be summoned by the signed-in user, prefilled', async () => {
+  const session = await signIn('nobody@example.org');
+  const html = await (await get('/?lookup=1', { cookie: session })).text();
+  assert.match(html, /<form method="post" action="\/lookup"/);
+  assert.match(html, /value="nobody@example\.org"/, 'their address is filled in for them');
+  assert.ok(!/Sign in with Google/.test(html), 'still no sign-in card');
+});
+
+test('signed in with repairs: the list shows and the forms stay hidden', async () => {
+  const { body } = await srv.call('/api/tickets', {
+    method: 'POST',
+    body: { serial: 'S9', asset_tag: 'PC-9', model: 'Lenovo 300e', user_email: 'has.tickets@example.org',
+            user_name: 'Has Tickets', issue_description: 'Cracked screen', notify: false },
+  });
+  assert.ok(body.ticket.id);
+
+  const session = await signIn('has.tickets@example.org');
+  const html = await (await get('/', { cookie: session })).text();
+  assert.match(html, /Your repairs/);
+  assert.match(html, /Cracked screen/);
+  assert.ok(!/Sign in with Google/.test(html));
+  assert.ok(!/<form method="post" action="\/lookup"/.test(html));
+  assert.ok(!/No repairs on your account/.test(html));
+});
+
+test('signed out, the page offers both ways in', async () => {
+  const html = await (await get('/')).text();
+  assert.match(html, /Sign in with Google/);
+  assert.match(html, /<form method="post" action="\/lookup"/);
+  assert.ok(!/No repairs on your account/.test(html));
+});
+
+test('every page carries the school crest', async () => {
+  const html = await (await get('/')).text();
+  assert.match(html, /<img src="\/logo\.png"/);
+  const logo = await get('/logo.png');
+  assert.equal(logo.status, 200);
+  assert.match(logo.headers.get('content-type') || '', /image\/png/);
+});

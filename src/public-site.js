@@ -14,6 +14,7 @@
  * history. Never internal notes, never other people's tickets.
  */
 const crypto = require('crypto');
+const path = require('path');
 const express = require('express');
 const cookieParser = require('cookie-parser');
 const config = require('./config');
@@ -57,7 +58,11 @@ const CSS = `
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}
 .band{background:${config.brand.primary};color:#fff;border-bottom:4px solid var(--gold)}
-.band .inner{max-width:680px;margin:0 auto;padding:16px 18px}
+.band .inner{max-width:680px;margin:0 auto;padding:14px 18px;display:flex;align-items:center;gap:14px}
+/* The eagle's body is the same maroon as the band, so it needs a light disc
+   behind it or it reads as a hole. */
+.crest{height:46px;width:46px;flex:0 0 auto;background:#fff;border-radius:50%;padding:5px;
+       object-fit:contain;box-shadow:0 1px 3px rgba(0,0,0,.25)}
 .band .school{font:600 17px/1.3 inherit}
 .band .dept{font:400 13px/1.4 inherit;opacity:.85}
 .wrap{max-width:680px;margin:0 auto;padding:22px 18px 48px}
@@ -102,8 +107,11 @@ function page(title, body, { extraHead = '' } = {}) {
 <title>${esc(title)}</title><style>${CSS}</style>${extraHead}</head>
 <body>
 <header class="band"><div class="inner">
-  <div class="school">${esc(config.orgName)}</div>
-  <div class="dept">${esc(config.helpdeskName)}</div>
+  <img src="/logo.png" alt="" class="crest" width="46" height="46">
+  <div>
+    <div class="school">${esc(config.orgName)}</div>
+    <div class="dept">${esc(config.helpdeskName)}</div>
+  </div>
 </div></header>
 <div class="wrap">${body}
 <p class="foot">${esc(config.orgName)} &middot; ${esc(config.helpdeskName)}</p>
@@ -253,29 +261,35 @@ function notFoundPage(what = 'That link is not valid any more.') {
     <a href="/">look up your device</a>.</p></div>`);
 }
 
-function homePage({ error, signedInAs, tickets } = {}) {
-  // A link, not Google's rendered button: the button needs a secure context and
-  // an https JavaScript origin, neither of which an internal http site has.
-  // The redirect flow behind this link works on both.
-  const gis = publicAuth.available()
+function homePage({ error, signedInAs, tickets, showLookup = false } = {}) {
+  const signedIn = Boolean(signedInAs);
+  const hasTickets = Boolean(tickets && tickets.length);
+
+  const signIn = !signedIn && publicAuth.available()
     ? `<div class="card">
         <h2>Sign in with your school account</h2>
         <p class="sub" style="margin:0 0 12px">See every repair filed for your account.</p>
         <a href="/auth/google"><button type="button">Sign in with Google</button></a>
       </div>`
     : '';
-  const lookup = config.publicSite.allowLookup
-    ? `<div class="card">
+
+  // The lookup form is for people who are not signed in - or who are, but have
+  // nothing on their own account and are chasing a device filed under someone
+  // else's name (a classroom cart, a sibling, a staff loaner).
+  const lookup = config.publicSite.allowLookup && (!signedIn || showLookup)
+    ? `<div class="card" id="lookup">
         <h2>Look up a repair</h2>
         <form method="post" action="/lookup">
           <label>Asset tag or serial number<input type="text" name="tag" required autocomplete="off"></label>
-          <label>Your school email address<input type="email" name="email" required autocomplete="email"></label>
+          <label>The email address on the ticket<input type="email" name="email" required autocomplete="email"
+            value="${esc(signedIn ? signedInAs : '')}"></label>
           <button type="submit">Check status</button>
         </form>
         <p class="sub" style="margin:14px 0 0">Both have to match what is on the ticket.</p>
       </div>`
     : '';
-  const list = tickets && tickets.length
+
+  const list = hasTickets
     ? `<div class="card"><h2>Your repairs</h2>${tickets
         .map(
           (t) => `<a class="ticket-row" href="/t/${esc(links.mint('t', t.id))}">
@@ -286,17 +300,34 @@ function homePage({ error, signedInAs, tickets } = {}) {
         )
         .join('')}</div>`
     : '';
-  const empty = signedInAs && (!tickets || !tickets.length)
-    ? `<div class="card"><p style="margin:0">No repair tickets for ${esc(signedInAs)}.</p></div>`
+
+  // Signed in with nothing to show: say what to do next rather than leaving a
+  // blank page that looks broken.
+  const empty = signedIn && !hasTickets
+    ? `<div class="card">
+        <h2>No repairs on your account</h2>
+        <p class="sub" style="margin:0 0 12px">Nothing has been filed for ${esc(signedInAs)}.</p>
+        <p style="margin:0 0 12px">If you have handed a device in, check your email &mdash; every update we send
+          contains a link straight to that repair, and it works even if the ticket was filed under a different
+          address.</p>
+        <p style="margin:0 0 14px">Otherwise, look it up with the asset tag from the sticker on the device.</p>
+        ${config.publicSite.allowLookup && !showLookup
+          ? '<a href="/?lookup=1#lookup"><button type="button">Look up a repair</button></a>'
+          : ''}
+      </div>`
     : '';
+
+  const help = !signedIn
+    ? `<div class="card"><p class="note" style="margin:0">The quickest way in is the link at the bottom of any
+        repair email we send you &mdash; it opens your ticket directly.</p></div>`
+    : '';
+
   return page(`${config.orgName} device repairs`, `
     <h1>Device repair status</h1>
     <p class="sub">${esc(config.orgName)} ${esc(config.helpdeskName)}</p>
     ${error ? `<div class="err">${esc(error)}</div>` : ''}
-    ${signedInAs ? `<p class="sub">Signed in as ${esc(signedInAs)} &middot; <a href="/signout">sign out</a></p>` : ''}
-    ${list}${empty}${gis}${lookup}
-    <div class="card"><p class="note" style="margin:0">The quickest way in is the link at the bottom of any
-    repair email we send you - it opens your ticket directly.</p></div>`,
+    ${signedIn ? `<p class="sub">Signed in as ${esc(signedInAs)} &middot; <a href="/signout">sign out</a></p>` : ''}
+    ${list}${empty}${signIn}${lookup}${help}`,
     {});
 }
 
@@ -476,9 +507,19 @@ function createPublicApp() {
 
   app.get('/healthz', (req, res) => res.json({ ok: true, site: 'public' }));
 
+  // The one static file this site serves. Everything else is rendered HTML, and
+  // keeping it that way is what makes the public port safe to expose.
+  app.get('/logo.png', (req, res) => {
+    const file = path.join(__dirname, '..', 'public', 'icons', 'eagle-header.png');
+    res.sendFile(file, { maxAge: '7d', headers: { 'Cache-Control': 'public, max-age=604800' } }, (err) => {
+      if (err) res.status(404).end();
+    });
+  });
+
   app.get('/', (req, res) => {
     const email = publicSessionEmail(req);
-    res.send(homePage(email ? { signedInAs: email, tickets: ticketsForEmail(email) } : {}));
+    const showLookup = String(req.query.lookup || '') === '1';
+    res.send(homePage(email ? { signedInAs: email, tickets: ticketsForEmail(email), showLookup } : {}));
   });
 
   // magic link -> status
@@ -568,8 +609,12 @@ function createPublicApp() {
     const { tag, email } = req.body || {};
     const tickets = findByTagAndEmail(tag, email);
     if (!tickets.length) {
+      const signedInAs = publicSessionEmail(req);
       return res.status(404).send(homePage({
         error: 'No repair found for that asset tag and email address together. Check both, or use the link in your repair email.',
+        signedInAs,
+        tickets: signedInAs ? ticketsForEmail(signedInAs) : null,
+        showLookup: true,
       }));
     }
     if (tickets.length === 1) return res.redirect(`/t/${links.mint('t', tickets[0].id)}`);
