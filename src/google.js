@@ -390,6 +390,74 @@ async function updateDeviceAnnotations(deviceId, fields) {
   return cacheDevice(normalizeDevice(res.data));
 }
 
+// --- deprovisioning ----------------------------------------------------------
+
+/**
+ * Reasons Google accepts for taking a Chromebook off the licence. The two that
+ * matter for a scrap pile are the retirement ones; the rest are here so the UI
+ * can offer the right words for the right situation.
+ */
+const DEPROVISION_REASONS = [
+  { value: 'retiring_device', label: 'Retiring the device (scrap / donor)' },
+  { value: 'different_model_replacement', label: 'Replaced with a different model' },
+  { value: 'same_model_replacement', label: 'Replaced with the same model' },
+  { value: 'upgrade_transfer', label: 'Upgrade transfer' },
+];
+
+/**
+ * Is this device still holding a licence? A donor sitting in Google Admin as
+ * ACTIVE is a licence we are paying for and a device that still counts against
+ * enrolment, so the parts page nags about it.
+ */
+async function deprovisionCheck(deviceId) {
+  const device = await getDevice(deviceId).catch(() => null);
+  if (!device) return { known: false, deprovisioned: false, status: null };
+  const status = String(device.status || '').toUpperCase();
+  return {
+    known: true,
+    deprovisioned: status === 'DEPROVISIONED',
+    disabled: status === 'DISABLED',
+    status: device.status || null,
+    device_id: device.device_id,
+    asset_tag: device.asset_tag,
+    serial: device.serial,
+    admin_url: adminDeviceUrl(device),
+    writeback_enabled: config.allowDeviceWriteback,
+  };
+}
+
+/** Deep link to the device in the Google Admin console, for the "do it yourself" path. */
+function adminDeviceUrl(device) {
+  const id = device && device.device_id;
+  return id ? `https://admin.google.com/ac/chrome/devices/${encodeURIComponent(id)}` : null;
+}
+
+/**
+ * Actually deprovision. This is one-way in Google - the device cannot be
+ * re-enrolled without a wipe and a licence - so the API route guards it and the
+ * UI asks twice.
+ */
+async function deprovisionDevice(deviceId, reason = 'retiring_device') {
+  if (!config.allowDeviceWriteback) {
+    const err = new Error('Device write-back is disabled (ALLOW_DEVICE_WRITEBACK=false)');
+    err.statusCode = 403;
+    throw err;
+  }
+  if (!DEPROVISION_REASONS.some((r) => r.value === reason)) {
+    const err = new Error(`Unknown deprovision reason "${reason}"`);
+    err.statusCode = 400;
+    throw err;
+  }
+  await directory().chromeosdevices.action({
+    customerId: 'my_customer',
+    resourceId: deviceId,
+    requestBody: { action: 'deprovision', deprovisionReason: reason },
+  });
+  // The action endpoint returns nothing useful, so re-read to get the new status.
+  const fresh = await getDevice(deviceId, { force: true }).catch(() => null);
+  return { ok: true, reason, device: fresh, check: await deprovisionCheck(deviceId) };
+}
+
 // --- loaners -----------------------------------------------------------------
 
 /**
@@ -642,6 +710,10 @@ module.exports = {
   classifyMatch,
   recentDevices,
   updateDeviceAnnotations,
+  DEPROVISION_REASONS,
+  deprovisionCheck,
+  deprovisionDevice,
+  adminDeviceUrl,
   normalizeLoanerTag,
   isLoaner,
   searchLoaners,

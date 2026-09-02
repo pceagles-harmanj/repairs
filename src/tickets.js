@@ -6,7 +6,7 @@ const google = require('./google');
 const mailer = require('./mailer');
 const schoolDays = require('./lib/schooldays');
 const subscriptions = require('./subscriptions');
-const { STATUS_KEYS, OPEN_STATUS_KEYS, PRIORITY_KEYS, statusLabel } = require('./lib/statuses');
+const { STATUS_KEYS, OPEN_STATUS_KEYS, PRIORITY_KEYS, statusLabel, canonicalStatus } = require('./lib/statuses');
 
 const now = () => new Date().toISOString();
 
@@ -48,6 +48,8 @@ function detail(id) {
     loaner_outstanding: Boolean(ticket.loaner_device_id || ticket.loaner_serial) && !ticket.loaner_returned_at,
     loaner_due: require('./loaners').dueInfo(ticket),
     parts_used: require('./inventory').partsForTicket(ticket.id),
+    parts_fitted: require('./inventory').ticketParts(ticket.id),
+    parts_cost: require('./inventory').ticketPartsCost(ticket.id),
     parts_incoming: require('./shipments').incomingForTicket(ticket.id),
     loaner_reminders_sent: getDb()
       .prepare('SELECT kind, sent_on FROM loaner_reminders WHERE ticket_id = ? ORDER BY id')
@@ -100,6 +102,7 @@ function validate(payload) {
 }
 
 async function create(payload, { author = null, notify } = {}) {
+  if (payload.status) payload = { ...payload, status: canonicalStatus(payload.status) };
   validate(payload);
   const ts = now();
   const row = {
@@ -111,7 +114,7 @@ async function create(payload, { author = null, notify } = {}) {
     user_name: payload.user_name || null,
     issue_category: payload.issue_category || null,
     issue_description: String(payload.issue_description).trim(),
-    status: payload.status || 'new',
+    status: canonicalStatus(payload.status) || 'received',
     priority: payload.priority || 'normal',
     assigned_to: payload.assigned_to || author || null,
     location: payload.location || null,
@@ -181,6 +184,8 @@ async function maybeEmail(ticket, statusKey, { notify, note } = {}) {
 async function update(id, patch = {}, { author = null, notify, note } = {}) {
   const before = get(id);
   if (!before) return null;
+  // Translate a renamed status before anything validates it.
+  if (patch.status) patch = { ...patch, status: canonicalStatus(patch.status) };
   validate({ ...before, ...patch });
 
   const sets = [];

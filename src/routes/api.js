@@ -8,6 +8,7 @@ const { resetTemplates } = require('../db');
 const backup = require('../backup');
 const loaners = require('../loaners');
 const inventory = require('../inventory');
+const models = require('../models');
 const shipments = require('../shipments');
 const tracking = require('../tracking');
 const links = require('../lib/links');
@@ -113,9 +114,17 @@ router.get('/users/lookup', async (req, res) => {
 const one = (v) => (Array.isArray(v) ? v[0] : v);
 const str = (v) => (v === undefined || v === null ? undefined : String(one(v)));
 
+const { canonicalStatus } = require('../lib/statuses');
+const statusFilter = (raw) => {
+  const value = str(raw);
+  if (!value) return value;
+  // "new" was renamed to "received"; a saved filter or bookmark still works.
+  return value.split(',').map((part) => canonicalStatus(part) || part).join(',');
+};
+
 router.get('/tickets', (req, res) => {
   res.json(tickets.list({
-    status: str(req.query.status),
+    status: statusFilter(req.query.status),
     q: str(req.query.q),
     assignee: str(req.query.assignee),
     limit: str(req.query.limit),
@@ -363,10 +372,20 @@ router.post('/inventory', (req, res) => {
   res.status(201).json({ item: inventory.create(req.body || {}, { author: authorOf(req) }) });
 });
 
+router.get('/inventory/shopping-list', (req, res) => {
+  const rows = inventory.shoppingList();
+  res.json({ items: rows, text: inventory.shoppingListText(rows) });
+});
+
+router.get('/inventory/fitting', (req, res) => {
+  res.json({ items: inventory.fitting(str(req.query.model), { limit: Number(str(req.query.limit)) || 25 }) });
+});
+
 router.get('/inventory/:id', (req, res) => {
-  const item = inventory.get(Number(req.params.id));
+  const item = inventory.detail(Number(req.params.id));
   if (!item) return res.status(404).json({ error: 'No such inventory item' });
-  res.json({ item, moves: inventory.moves({ itemId: item.id, limit: 100 }) });
+  // `moves` stays at the top level: the UI has been reading it there.
+  res.json({ item, moves: item.moves });
 });
 
 router.patch('/inventory/:id', (req, res) => {
@@ -394,11 +413,129 @@ router.post('/inventory/:id/harvest', (req, res) => {
   }));
 });
 
+// ---- donor part lists -------------------------------------------------------
+router.get('/inventory/:id/parts', (req, res) => {
+  const donor = inventory.get(Number(req.params.id));
+  if (!donor) return res.status(404).json({ error: 'No such inventory item' });
+  const suggestions = donor.model_id ? models.partsFor(donor.model_id) : [];
+  res.json({ parts: inventory.donorParts(donor.id), suggestions });
+});
+
+router.post('/inventory/:id/parts', (req, res) => {
+  const entries = Array.isArray(req.body && req.body.parts) ? req.body.parts : [req.body || {}];
+  res.json({ parts: inventory.addDonorParts(Number(req.params.id), entries, { author: authorOf(req) }) });
+});
+
+router.patch('/inventory/:id/parts/:partId', (req, res) => {
+  const { state, note } = req.body || {};
+  const part = inventory.setDonorPartState(Number(req.params.partId), state, { author: authorOf(req), note });
+  res.json({ part, parts: inventory.donorParts(Number(req.params.id)) });
+});
+
+router.delete('/inventory/:id/parts/:partId', (req, res) => {
+  inventory.removeDonorPart(Number(req.params.partId));
+  res.json({ parts: inventory.donorParts(Number(req.params.id)) });
+});
+
+// ---- device models ----------------------------------------------------------
+router.get('/models', (req, res) => {
+  res.json({ models: models.list({ q: str(req.query.q), includeArchived: str(req.query.archived) === '1' }) });
+});
+
+router.post('/models', (req, res) => {
+  const name = String((req.body && req.body.name) || '').trim();
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  res.status(201).json({ model: models.ensure(name, req.body || {}) });
+});
+
+router.get('/models/:id/parts', (req, res) => {
+  res.json({ parts: models.partsFor(Number(req.params.id)) });
+});
+
+router.patch('/models/:id', (req, res) => {
+  const model = models.update(Number(req.params.id), req.body || {});
+  if (!model) return res.status(404).json({ error: 'No such model' });
+  res.json({ model });
+});
+
+router.delete('/models/:id', (req, res) => {
+  res.json({ ok: models.remove(Number(req.params.id)) });
+});
+
+router.post('/models/seed', async (req, res, next) => {
+  try {
+    res.json(await models.seedFromFleet());
+  } catch (err) { next(err); }
+});
+
+// Which models does this part fit?
+router.put('/inventory/:id/models', (req, res) => {
+  const item = inventory.get(Number(req.params.id));
+  if (!item) return res.status(404).json({ error: 'No such inventory item' });
+  const list = Array.isArray(req.body && req.body.models) ? req.body.models : [];
+  res.json({ models: models.setForItem(item.id, list), item: inventory.get(item.id) });
+});
+
+// ---- deprovisioning a donor -------------------------------------------------
+router.get('/devices/:deviceId/deprovision', async (req, res, next) => {
+  try {
+    res.json({ check: await google.deprovisionCheck(req.params.deviceId), reasons: google.DEPROVISION_REASONS });
+  } catch (err) { next(err); }
+});
+
+router.post('/devices/:deviceId/deprovision', async (req, res, next) => {
+  try {
+    const { reason, confirm } = req.body || {};
+    // Deprovisioning cannot be undone, so the client has to say so out loud.
+    if (confirm !== true && confirm !== 'yes') {
+      return res.status(400).json({ error: 'This cannot be undone. Send confirm:true to go ahead.' });
+    }
+    res.json(await google.deprovisionDevice(req.params.deviceId, reason || 'retiring_device'));
+  } catch (err) { next(err); }
+});
+
 // ---- parts on a ticket ------------------------------------------------------
 router.get('/tickets/:id/parts', (req, res) => {
   const id = Number(req.params.id);
   if (!tickets.get(id)) return res.status(404).json({ error: 'Ticket not found' });
-  res.json({ used: inventory.partsForTicket(id), incoming: shipments.incomingForTicket(id) });
+  res.json({
+    used: inventory.partsForTicket(id),
+    fitted: inventory.ticketParts(id),
+    parts_cost: inventory.ticketPartsCost(id),
+    incoming: shipments.incomingForTicket(id),
+  });
+});
+
+// Fitting a part, whatever it came from: the shelf, a donor, or an order.
+router.post('/tickets/:id/fitted', (req, res) => {
+  const id = Number(req.params.id);
+  if (!tickets.get(id)) return res.status(404).json({ error: 'Ticket not found' });
+  res.status(201).json(inventory.fitPart(id, req.body || {}, { author: authorOf(req) }));
+});
+
+router.delete('/tickets/:id/fitted/:partId', (req, res) => {
+  const id = Number(req.params.id);
+  if (!tickets.get(id)) return res.status(404).json({ error: 'Ticket not found' });
+  res.json(inventory.unfitPart(id, Number(req.params.partId), { author: authorOf(req) }));
+});
+
+// Donor parts that are still on the shelf, for the ticket's part picker.
+router.get('/donor-parts', (req, res) => {
+  const q = str(req.query.q);
+  const rows = require('../db').getDb()
+    .prepare(
+      `SELECT p.id, p.label, p.item_id, d.id AS donor_id, d.name AS donor_name, d.asset_tag AS donor_asset_tag,
+              COALESCE(m.name, d.fits_models) AS donor_models
+         FROM donor_parts p
+         JOIN inventory_items d ON d.id = p.donor_id
+         LEFT JOIN device_models m ON m.id = d.model_id
+        WHERE p.state = 'available' AND d.archived = 0
+          AND (? = '' OR p.label LIKE ? OR d.name LIKE ? OR d.asset_tag LIKE ?
+               OR COALESCE(m.name, '') LIKE ? OR COALESCE(d.fits_models, '') LIKE ?)
+        ORDER BY d.name, p.label LIMIT 100`
+    )
+    .all(q, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
+  res.json({ parts: rows });
 });
 
 router.post('/tickets/:id/parts', (req, res) => {

@@ -38,8 +38,10 @@ const EXPLAIN = {
   in_progress: 'The repair is underway.',
   waiting_on_parts: 'We are waiting on a part to arrive before we can finish.',
   waiting_on_user: 'We need something from you before we can continue - check your email.',
+  waiting_on_approval: 'This repair needs an OK before we can go ahead - check your email.',
   ready_for_pickup: 'The repair is finished. Come pick it up at the technology office.',
   closed: 'This repair is complete and the ticket is closed.',
+  beyond_repair: 'This device could not be repaired. Come and see the technology office about what happens next.',
   cancelled: 'This ticket was cancelled and no work is planned.',
 };
 

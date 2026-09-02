@@ -80,7 +80,7 @@ const highlight = (text) => `        <table role="presentation" width="100%" cel
         </table>`;
 
 const DEFAULT_TEMPLATES = {
-  new: {
+  received: {
     subject: 'We have your device - ticket #{{ticket_number}}',
     auto_send: 1,
     body: shell({
@@ -163,6 +163,41 @@ ${deviceRows([
 ])}
 <!--if:loaner_line--><p style="margin:0 0 12px">{{loaner_line}}</p><!--/if-->
         <p style="margin:0">See you soon.</p>`,
+    }),
+  },
+
+  waiting_on_approval: {
+    subject: 'We need an OK before we can fix your device - ticket #{{ticket_number}}',
+    auto_send: 1,
+    body: shell({
+      preheader: 'We need approval before going ahead with this repair.',
+      heading: 'We need an OK before we go ahead',
+      body: `        <p style="margin:0 0 12px">Hi {{first_name}} - your {{model}} needs a repair that has to be
+          approved before we order the part or start work.</p>
+${note('What we need approved')}
+${deviceRows([
+  ['Device', '{{model}}'],
+  ['Asset tag', '{{asset_tag}}'],
+  ['Estimated cost', '{{estimated_cost}}'],
+])}
+        <p style="margin:0 0 12px">Reply to this email, or come and see the {{helpdesk_name}}, and we will get
+          straight on with it.</p>
+<!--if:loaner_line--><p style="margin:0">{{loaner_line}}</p><!--/if-->`,
+    }),
+  },
+
+  beyond_repair: {
+    subject: 'About your device - ticket #{{ticket_number}}',
+    auto_send: 0,
+    body: shell({
+      preheader: 'This device cannot be repaired.',
+      heading: 'We could not save this one',
+      body: `        <p style="margin:0 0 12px">Hi {{first_name}} - we have looked at your {{model}} carefully, and it
+          cannot be repaired sensibly.</p>
+${note('What we found')}
+        <p style="margin:0 0 12px">Come and see the {{helpdesk_name}} and we will sort out what happens next.
+          Nothing is expected from you before then.</p>
+<!--if:loaner_line--><p style="margin:0">{{loaner_line}}</p><!--/if-->`,
     }),
   },
 
@@ -310,8 +345,8 @@ Object.assign(DEFAULT_TEMPLATES, PARTS_TEMPLATES);
 
 /** Every template key, status emails first, in the order Settings shows them. */
 const TEMPLATE_KEYS = [
-  'new', 'diagnosing', 'in_progress', 'waiting_on_parts', 'waiting_on_user',
-  'ready_for_pickup', 'closed', 'cancelled',
+  'received', 'diagnosing', 'in_progress', 'waiting_on_parts', 'waiting_on_user',
+  'waiting_on_approval', 'ready_for_pickup', 'closed', 'beyond_repair', 'cancelled',
   'loaner_due_tomorrow', 'loaner_due_today', 'loaner_overdue',
   'parts_shipped', 'parts_arriving_today', 'parts_arrived',
 ];

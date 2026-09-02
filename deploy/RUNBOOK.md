@@ -287,6 +287,12 @@ which point set `TLS_CERT_PATH`/`TLS_KEY_PATH` and change the URLs to `https`.
 
 ---
 
+## The second campus, and surviving a dead host
+
+Both are in **[NETWORK-HA.md](NETWORK-HA.md)**: a WireGuard site-to-site tunnel so
+campus B reaches this one server (config templates and a setup script live in
+`deploy/wireguard/`), and a Proxmox HA plan for when a second host exists.
+
 ## Day-to-day
 
 ```bash

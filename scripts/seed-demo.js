@@ -42,7 +42,7 @@ const TICKETS = [
     priority: 'low', assigned_to: 'jacob', status: 'closed', note: 'Powerwash fixed it. Returned to student.' },
   { device: 1, user_email: 'alex.jones@example.org', user_name: 'Alex Jones', issue_category: 'Trackpad',
     issue_description: 'Trackpad click sticks. Reported by teacher during 3rd period.',
-    priority: 'normal', assigned_to: null, status: 'new', note: '' },
+    priority: 'normal', assigned_to: null, status: 'received', note: '' },
 ];
 
 (async () => {
@@ -68,7 +68,7 @@ const TICKETS = [
       },
       { author: 'seed', notify: false }
     );
-    if (spec.status !== 'new') {
+    if (spec.status !== 'received') {
       await tickets.update(ticket.id, { status: spec.status }, { author: 'seed', note: spec.note, notify: false });
     }
     console.log(`seeded ticket #${ticket.id} (${spec.status})`);

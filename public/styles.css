@@ -27,6 +27,7 @@
   --brand: #8A1538;
   --brand-dark: #6E1029;
   --brand-accent: #ECAE12;
+  --brand-tint: #F6EDF0;
 }
 * { box-sizing: border-box; }
 body {
@@ -327,4 +328,44 @@ tbody tr.clickable:hover { background: var(--panel-2); }
 /* Installed as an app: no browser chrome, so keep clear of the status bar. */
 @media (display-mode: standalone) {
   header.topbar { padding-top: max(10px, env(safe-area-inset-top)); }
+}
+
+/* --- device model picker ---------------------------------------------------- */
+.modelpick { border: 1px solid var(--line); border-radius: 8px; padding: 4px; background: #fff; }
+.modelpick .mp-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.modelpick .mp-chips:not(:empty) { margin-bottom: 4px; }
+.mp-chip {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+  background: var(--brand-tint, #f4eef0); color: var(--brand, #6b1f32);
+  border-radius: 999px; padding: 3px 6px 3px 10px;
+}
+.mp-chip button {
+  border: 0; background: none; cursor: pointer; color: inherit; font-size: 13px;
+  line-height: 1; padding: 0 2px; opacity: .65;
+}
+.mp-chip button:hover { opacity: 1; }
+.modelpick .mp-input { position: relative; }
+.modelpick .mp-q { width: 100%; border: 0; outline: none; padding: 6px; font: inherit; background: transparent; }
+.mp-list {
+  position: absolute; z-index: 40; left: 0; right: 0; top: 100%; max-height: 240px; overflow: auto;
+  background: #fff; border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.12);
+}
+.mp-opt {
+  display: flex; justify-content: space-between; gap: 10px; width: 100%; text-align: left;
+  border: 0; background: none; font: inherit; padding: 8px 10px; cursor: pointer;
+}
+.mp-opt:hover { background: var(--brand-tint, #f4eef0); }
+.mp-new { font-weight: 600; }
+.mp-empty { padding: 8px 10px; }
+
+/* --- inline warnings and link-styled buttons -------------------------------- */
+.banner {
+  border: 1px solid var(--line); border-left: 4px solid var(--muted);
+  border-radius: 8px; padding: 10px 12px; margin: 14px 0; font-size: 14px;
+}
+.banner.warn { border-left-color: var(--warn, #b9860b); background: #fff8e6; }
+.banner.warn a { color: inherit; }
+.linkish {
+  border: 0; background: none; padding: 0; font: inherit; color: var(--brand, #6b1f32);
+  text-decoration: underline; cursor: pointer;
 }

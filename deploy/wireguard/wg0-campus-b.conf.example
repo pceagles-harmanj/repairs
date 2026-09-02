@@ -1,0 +1,23 @@
+# /etc/wireguard/wg0.conf  --  CAMPUS B (the campus that reaches across)
+#
+# This side dials out, so campus B needs no port forward at all - only campus A
+# does. If campus A's public IP is dynamic, put a hostname in Endpoint and add
+# `wg-quick down wg0 && wg-quick up wg0` to a nightly cron, or use a dynamic DNS
+# name; WireGuard re-resolves only when the interface comes up.
+
+[Interface]
+Address    = 10.99.0.2/30
+PrivateKey = <B_PRIVATE_KEY>
+MTU        = 1420
+
+PostUp   = sysctl -w net.ipv4.ip_forward=1
+PostUp   = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT
+
+[Peer]
+# Campus A
+PublicKey           = <A_PUBLIC_KEY>
+PresharedKey        = <PSK>
+Endpoint            = <CAMPUS_A_PUBLIC_IP_OR_HOSTNAME>:51820
+AllowedIPs          = 10.99.0.1/32, 10.10.0.0/24
+PersistentKeepalive = 25

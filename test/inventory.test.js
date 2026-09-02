@@ -380,3 +380,92 @@ test('a donor harvest reads as a harvest on the ticket, not a return', async () 
   assert.equal(row.qty, null, 'a harvest log has no count of its own');
   assert.match(row.note, /hinge set/);
 });
+
+// ---- the clarity work -------------------------------------------------------
+
+test('parts that fit a device are found by words, not exact strings', async () => {
+  await srv.call('/api/inventory', { method: 'POST', body: { name: 'LCD 11.6 300e', fits_models: 'Lenovo 300e, Lenovo 500e', qty_on_hand: 3 } });
+  await srv.call('/api/inventory', { method: 'POST', body: { name: 'HP G9 screen', fits_models: 'HP Chromebook 11 G9 EE', qty_on_hand: 2 } });
+
+  const res = await srv.call('/api/inventory/fitting?model=' + encodeURIComponent('Lenovo 300e Chromebook Gen 3'));
+  assert.equal(res.status, 200);
+  const names = res.body.items.map((i) => i.name);
+  assert.ok(names.includes('LCD 11.6 300e'), names.join(','));
+  assert.ok(!names.includes('HP G9 screen'), 'a different model does not match');
+
+  const none = await srv.call('/api/inventory/fitting?model=Acer%20Spin%20511');
+  assert.equal(none.body.items.length, 0);
+
+  // "Chromebook" is in every model name and must not be what matches
+  const generic = await srv.call('/api/inventory/fitting?model=Chromebook');
+  assert.equal(generic.body.items.length, 0, 'a generic word matches nothing');
+});
+
+test('the shopping list suggests quantities and shows how fast things go', async () => {
+  const { body: made } = await srv.call('/api/inventory', {
+    method: 'POST', body: { name: 'Battery 300e', qty_on_hand: 4, reorder_point: 3 },
+  });
+  const ticket = (await newTicket()).body.ticket.id;
+  await srv.call(`/api/tickets/${ticket}/parts`, { method: 'POST', body: { item_id: made.item.id, qty: 2 } });
+
+  const res = await srv.call('/api/inventory/shopping-list');
+  const row = res.body.items.find((i) => i.id === made.item.id);
+  assert.ok(row, 'a part at its reorder point is on the list');
+  assert.equal(row.qty_on_hand, 2);
+  assert.equal(row.used_30, 2);
+  assert.ok(row.suggested_qty > 0, 'it suggests how many to buy');
+  assert.match(res.body.text, /Battery 300e/, 'and gives you something to paste into an order');
+});
+
+test('what is already on order is deducted from the suggestion', async () => {
+  const { body: made } = await srv.call('/api/inventory', {
+    method: 'POST', body: { name: 'Hinge set 500e', qty_on_hand: 0, reorder_point: 2 },
+  });
+  const before = (await srv.call('/api/inventory/shopping-list')).body.items.find((i) => i.id === made.item.id);
+
+  await srv.call('/api/shipments', {
+    method: 'POST', body: { vendor: 'V', lines: [{ item_id: made.item.id, qty: 3 }] },
+  });
+  const after = (await srv.call('/api/inventory/shopping-list')).body.items.find((i) => i.id === made.item.id);
+  assert.equal(after.on_order, 3);
+  assert.ok(after.suggested_qty < before.suggested_qty, 'do not order twice');
+});
+
+test('an item detail carries usage, tickets, on-order and receipts', async () => {
+  const { body: made } = await srv.call('/api/inventory', { method: 'POST', body: { name: 'Trackpad 500e', qty_on_hand: 5 } });
+  const ticket = (await newTicket()).body.ticket.id;
+  await srv.call(`/api/tickets/${ticket}/parts`, { method: 'POST', body: { item_id: made.item.id, qty: 1 } });
+
+  const { item } = (await srv.call('/api/inventory/' + made.item.id)).body;
+  assert.equal(item.usage_30.used, 1);
+  assert.equal(item.usage_90.used, 1);
+  assert.equal(item.tickets[0].ticket_id, ticket);
+  assert.equal(item.on_order, 0);
+  assert.ok(item.last_received, 'the opening count counts as a receipt');
+  assert.ok(item.moves.length >= 2);
+});
+
+test('a donor summarises what has been taken off it', async () => {
+  const { body: donor } = await srv.call('/api/inventory', {
+    method: 'POST', body: { kind: 'donor_device', name: 'Lenovo 300e donor', serial: 'D-1', asset_tag: 'PC-9500', qty_on_hand: 1 },
+  });
+  await srv.call(`/api/inventory/${donor.item.id}/harvest`, { method: 'POST', body: { what: 'LCD panel' } });
+  await srv.call(`/api/inventory/${donor.item.id}/harvest`, { method: 'POST', body: { what: 'keyboard' } });
+
+  const listed = (await srv.call('/api/inventory?kind=donor_device')).body.items.find((i) => i.id === donor.item.id);
+  assert.equal(listed.harvest_count, 2);
+  assert.ok(listed.last_harvest_at);
+
+  const { item } = (await srv.call('/api/inventory/' + donor.item.id)).body;
+  assert.equal(item.harvests.length, 2);
+  assert.match(item.harvests[0].note, /keyboard/, 'newest first');
+  assert.equal(item.donor_status, 'harvested');
+});
+
+test('the parts list and the donor list are separate', async () => {
+  const parts = (await srv.call('/api/inventory?kind=part')).body.items;
+  const donors = (await srv.call('/api/inventory?kind=donor_device')).body.items;
+  assert.ok(parts.length > 0 && donors.length > 0);
+  assert.ok(parts.every((i) => i.kind === 'part'));
+  assert.ok(donors.every((i) => i.kind === 'donor_device'));
+});

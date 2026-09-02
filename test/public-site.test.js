@@ -191,7 +191,7 @@ test('unsubscribing then re-subscribing leaves a working list, not silence', asy
   assert.ok(!/disabled/.test(html), 'checkboxes must stay usable while unsubscribed');
 
   // saving that form (boxes checked, "stop all" unticked) turns email back on
-  const picked = ['new', 'in_progress', 'waiting_on_parts', 'waiting_on_user', 'ready_for_pickup'];
+  const picked = ['received', 'in_progress', 'waiting_on_parts', 'waiting_on_user', 'ready_for_pickup'];
   await post('/u/' + token, { statuses_present: '1', status: picked });
   assert.equal(subscriptions.isOptedOut('student.one@example.org'), false);
 

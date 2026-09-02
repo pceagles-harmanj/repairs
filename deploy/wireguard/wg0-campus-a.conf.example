@@ -1,0 +1,31 @@
+# /etc/wireguard/wg0.conf  --  CAMPUS A (the campus that hosts the repairs server)
+#
+# This side listens. It needs one UDP port open from the internet; campus B
+# dials in. Nothing else is exposed - WireGuard does not answer unauthenticated
+# packets, so a port scan of 51820 looks like a closed port.
+#
+# Fill in:
+#   <A_PRIVATE_KEY>   from `wg genkey` on this box (keep it 600 root:root)
+#   <B_PUBLIC_KEY>    the public key campus B prints during setup
+#   <PSK>             from `wg genpsk` - the same string on both sides
+#   10.10.0.0/24      campus A LAN            <- change to your real subnet
+#   10.20.0.0/24      campus B LAN            <- change to your real subnet
+
+[Interface]
+Address    = 10.99.0.1/30
+ListenPort = 51820
+PrivateKey = <A_PRIVATE_KEY>
+MTU        = 1420
+
+# Let traffic cross between the tunnel and the LAN. Kept in the config so the
+# routing dies with the tunnel rather than lingering after `wg-quick down`.
+PostUp   = sysctl -w net.ipv4.ip_forward=1
+PostUp   = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT
+
+[Peer]
+# Campus B
+PublicKey           = <B_PUBLIC_KEY>
+PresharedKey        = <PSK>
+AllowedIPs          = 10.99.0.2/32, 10.20.0.0/24
+PersistentKeepalive = 25

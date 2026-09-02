@@ -11,13 +11,15 @@ const state = {
   view: 'tickets',
   openTicketId: null,
   templates: [],
-  activeTemplate: 'new',
+  activeTemplate: 'received',
   loanerFilter: 'out',
   loanerData: null,
   invTab: 'onhand',
+  partSource: 'stock',
   invSearch: '',
   invData: null,
   shipData: null,
+  shopData: null,
 };
 
 // ---------------------------------------------------------------- utilities
@@ -1455,31 +1457,72 @@ function renderLoanerReminderCard() {
  * Parts on a ticket: what was fitted (straight off the shelf, with history) and
  * what is still on the way, with the sentence the student has been told.
  */
+const SOURCE_LABEL = { stock: 'From stock', donor: 'From a donor', purchased: 'Bought for this' };
+const SOURCE_COLOR = { stock: 'var(--brand)', donor: 'var(--ok)', purchased: 'var(--brand-accent)' };
+
 function renderPartsPanel(t) {
   const box = $('#d-parts');
   if (!box) return;
-  const used = t.parts_used || [];
+  const used = (t.parts_used || []).filter((p) => p.reason !== 'use' && p.reason !== 'return');
+  const fitted = t.parts_fitted || [];
   const incoming = t.parts_incoming || [];
+  const source = state.partSource || 'stock';
 
   box.innerHTML = `
-    ${used.length
-      ? `<table><tbody>${used.map((p) => `<tr>
-          <td data-label="Part"><b>${esc(p.name)}</b>${p.part_number ? ` <span class="small muted mono">${esc(p.part_number)}</span>` : ''}
-            <div class="small muted">${p.qty ? `${esc(p.qty)} ` : ''}${esc(p.direction)} &middot; ${esc(relTime(p.created_at))} &middot; ${esc(p.author || 'system')}${p.note && !p.fitted ? ` &middot; ${esc(p.note)}` : ''}</div></td>
-          <td style="width:110px" class="row-actions">${p.fitted
-            ? `<button class="btn ghost sm" data-part-return="${p.item_id}" data-qty="${p.qty}">Put back</button>` : ''}</td>
-        </tr>`).join('')}</tbody></table>`
+    ${fitted.length
+      ? `<table><tbody>${fitted.map((p) => `<tr>
+          <td data-label="Part"><b>${esc(p.description)}</b>${p.part_number ? ` <span class="small muted mono">${esc(p.part_number)}</span>` : ''}
+            <div class="small muted">${esc(p.qty)} &times; <span class="pill" style="background:${SOURCE_COLOR[p.source] || 'var(--muted)'}">${esc(SOURCE_LABEL[p.source] || p.source)}</span>
+              ${p.source === 'donor' && p.donor_name ? ` from ${esc(p.donor_asset_tag || p.donor_name)}` : ''}
+              ${p.vendor ? ` &middot; ${esc(p.vendor)}` : ''}
+              ${p.line_cost != null ? ` &middot; $${esc(p.line_cost.toFixed(2))}` : ''}
+              &middot; ${esc(relTime(p.created_at))} &middot; ${esc(p.author || 'system')}</div></td>
+          <td style="width:110px" class="row-actions">
+            <button class="btn ghost sm" data-unfit="${p.id}">Put back</button></td>
+        </tr>`).join('')}</tbody>
+        ${t.parts_cost ? `<tfoot><tr><td class="small muted">Parts on this repair</td>
+          <td class="small" style="text-align:right"><b>$${esc(Number(t.parts_cost).toFixed(2))}</b></td></tr></tfoot>` : ''}</table>`
       : '<p class="small muted" style="margin-top:0">No parts fitted yet.</p>'}
 
-    <div class="row" style="align-items:flex-end;margin-top:10px">
-      <label class="field" style="flex:2 1 220px;margin-bottom:0"><span>Fit a part from stock</span>
-        <input type="text" id="d-part-q" placeholder="Search parts, bins, models" list="d-part-list" autocomplete="off">
-        <datalist id="d-part-list"></datalist></label>
-      <label class="field" style="flex:0 1 90px;margin-bottom:0"><span>Qty</span>
-        <input type="number" id="d-part-qty" value="1" min="1"></label>
-      <button class="btn" id="d-part-use" style="flex:0 0 auto">Use it</button>
+    ${used.length ? `<details style="margin-top:8px"><summary class="small muted">Other stock movement on this ticket</summary>
+      <ul class="small muted" style="margin:6px 0 0;padding-left:18px">${used.map((p) => `<li>${esc(p.name)} &middot; ${esc(p.direction)} &middot; ${esc(relTime(p.created_at))}</li>`).join('')}</ul></details>` : ''}
+
+    <div id="d-part-fits" class="small muted" style="margin-top:12px"></div>
+
+    <div class="chips" style="margin-top:10px">
+      ${['stock', 'donor', 'purchased'].map((k) => `<button class="chip${source === k ? ' active' : ''}" data-psource="${k}">${esc(SOURCE_LABEL[k])}</button>`).join('')}
     </div>
-    <div id="d-part-hits" class="small muted" style="margin-top:6px"></div>
+
+    <div id="d-part-form" style="margin-top:8px">${source === 'stock'
+      ? `<div class="row" style="align-items:flex-end">
+          <label class="field" style="flex:2 1 220px;margin-bottom:0"><span>Part from stock</span>
+            <input type="text" id="d-part-q" placeholder="Search parts, bins, models" list="d-part-list" autocomplete="off">
+            <datalist id="d-part-list"></datalist></label>
+          <label class="field" style="flex:0 1 90px;margin-bottom:0"><span>Qty</span>
+            <input type="number" id="d-part-qty" value="1" min="1"></label>
+          <button class="btn" id="d-part-use" style="flex:0 0 auto">Use it</button>
+        </div>
+        <div id="d-part-hits" class="small muted" style="margin-top:6px"></div>`
+      : source === 'donor'
+      ? `<div class="row" style="align-items:flex-end">
+          <label class="field" style="flex:2 1 260px;margin-bottom:0"><span>Part off a donor device</span>
+            <select id="d-donor-part"><option value="">Loading...</option></select></label>
+          <button class="btn" id="d-donor-use" style="flex:0 0 auto">Take it</button>
+        </div>
+        <div class="small muted" style="margin-top:6px">Only parts still marked available on a donor show here.</div>`
+      : `<div class="row" style="align-items:flex-end">
+          <label class="field" style="flex:2 1 200px;margin-bottom:0"><span>What was bought</span>
+            <input type="text" id="d-buy-what" placeholder="LCD 11.6 30-pin"></label>
+          <label class="field" style="flex:1 1 130px;margin-bottom:0"><span>Vendor</span>
+            <input type="text" id="d-buy-vendor" placeholder="Parts People"></label>
+          <label class="field" style="flex:0 1 80px;margin-bottom:0"><span>Qty</span>
+            <input type="number" id="d-buy-qty" value="1" min="1"></label>
+          <label class="field" style="flex:0 1 110px;margin-bottom:0"><span>Each ($)</span>
+            <input type="number" id="d-buy-cost" step="0.01" min="0" placeholder="38.50"></label>
+          <button class="btn" id="d-buy-add" style="flex:0 0 auto">Add</button>
+        </div>
+        <div class="small muted" style="margin-top:6px">For parts bought for this repair only - nothing is taken off the shelf.</div>`}
+    </div>
 
     <h2 style="font-size:14px;margin:18px 0 8px">On the way</h2>
     ${incoming.length
@@ -1494,9 +1537,42 @@ function renderPartsPanel(t) {
         </div>`).join('')
       : `<p class="small muted">Nothing on order for this ticket. <a href="#" id="d-part-order">Add a shipment</a>.</p>`}`;
 
-  // typeahead over stock
+  // What actually fits this machine, offered before anyone types. Saves
+  // scrolling past every screen you own to find the one for a 300e.
   let matches = [];
+  if (t.model) {
+    api('/inventory/fitting?model=' + encodeURIComponent(t.model))
+      .then(({ items }) => {
+        const box = $('#d-part-fits');
+        if (!box) return;
+        if (!items.length) {
+          box.innerHTML = `<span class="muted">Nothing in stock is marked as fitting a ${esc(t.model)}.</span>`;
+          return;
+        }
+        matches = items;
+        box.innerHTML = `<div style="margin-bottom:6px">Fits this ${esc(t.model)}:</div>`
+          + items.slice(0, 5).map((i) => `<button class="btn ghost sm" data-fit="${i.id}" style="margin:0 6px 6px 0"
+              ${i.qty_on_hand <= 0 ? 'disabled title="none on hand"' : ''}>${esc(i.name)}
+              <span class="muted">${esc(i.qty_on_hand)} in ${esc(i.location || 'stock')}</span></button>`).join('');
+        $$('[data-fit]', box).forEach((b) =>
+          b.addEventListener('click', (e) =>
+            busyish(e.target, async () => {
+              await api(`/tickets/${t.id}/fitted`, {
+                method: 'POST',
+                body: { source: 'stock', item_id: Number(b.dataset.fit), qty: Number(($('#d-part-qty') || {}).value) || 1 },
+              });
+              toast('Fitted');
+              state.invData = null;
+              state.shopData = null;
+              await refreshTicket();
+            })
+          )
+        );
+      })
+      .catch(() => {});
+  }
   const search = async () => {
+    if (!$('#d-part-q')) return;
     const q = cleanScan($('#d-part-q').value);
     if (q.length < 2) { $('#d-part-hits').textContent = ''; return; }
     try {
@@ -1510,31 +1586,87 @@ function renderPartsPanel(t) {
       $('#d-part-hits').textContent = err.message;
     }
   };
-  let partTimer;
-  $('#d-part-q').addEventListener('input', () => { clearTimeout(partTimer); partTimer = setTimeout(search, 220); });
-  attachScanner($('#d-part-q'), search);
+  const afterFit = async (message) => {
+    toast(message);
+    state.invData = null;
+    state.shopData = null;
+    await refreshTicket();
+  };
 
-  $('#d-part-use').addEventListener('click', (e) =>
-    busyish(e.target, async () => {
-      const text = cleanScan($('#d-part-q').value);
-      const match = matches.find((i) => i.label === text || i.name === text) || (matches.length === 1 ? matches[0] : null);
-      if (!match) { toast('Pick a part from the list first', true); return; }
-      await api(`/tickets/${t.id}/parts`, { method: 'POST', body: { item_id: match.id, qty: Number($('#d-part-qty').value) || 1 } });
-      toast(`Fitted ${match.name}`);
-      state.invData = null;
-      await refreshTicket();
-    })
-  );
-  $$('[data-part-return]').forEach((b) =>
+  // Which of the three provenances is showing.
+  $$('[data-psource]', box).forEach((b) =>
+    b.addEventListener('click', () => { state.partSource = b.dataset.psource; renderPartsPanel(t); }));
+
+  if (source === 'stock') {
+    let partTimer;
+    $('#d-part-q').addEventListener('input', () => { clearTimeout(partTimer); partTimer = setTimeout(search, 220); });
+    attachScanner($('#d-part-q'), search);
+    $('#d-part-use').addEventListener('click', (e) =>
+      busyish(e.target, async () => {
+        const text = cleanScan($('#d-part-q').value);
+        const match = matches.find((i) => i.label === text || i.name === text) || (matches.length === 1 ? matches[0] : null);
+        if (!match) { toast('Pick a part from the list first', true); return; }
+        await api(`/tickets/${t.id}/fitted`, {
+          method: 'POST',
+          body: { source: 'stock', item_id: match.id, qty: Number($('#d-part-qty').value) || 1 },
+        });
+        await afterFit(`Fitted ${match.name}`);
+      })
+    );
+  }
+
+  if (source === 'donor') {
+    api('/donor-parts' + (t.model ? '?q=' + encodeURIComponent(t.model) : ''))
+      .then(({ parts }) => {
+        const sel = $('#d-donor-part');
+        if (!sel) return;
+        // The model filter is a first guess, not a rule: fall back to everything.
+        const showAll = !parts.length;
+        const finish = (rows) => {
+          sel.innerHTML = rows.length
+            ? rows.map((p) => `<option value="${p.id}">${esc(p.label)} - ${esc(p.donor_asset_tag || p.donor_name)}${p.donor_models ? ` (${esc(p.donor_models)})` : ''}</option>`).join('')
+            : '<option value="">No donor parts available</option>';
+        };
+        if (showAll) api('/donor-parts').then(({ parts: all }) => finish(all)).catch(() => finish([]));
+        else finish(parts);
+      })
+      .catch(() => { if ($('#d-donor-part')) $('#d-donor-part').innerHTML = '<option value="">Could not load</option>'; });
+
+    $('#d-donor-use').addEventListener('click', (e) =>
+      busyish(e.target, async () => {
+        const id = Number($('#d-donor-part').value);
+        if (!id) { toast('Pick a donor part first', true); return; }
+        await api(`/tickets/${t.id}/fitted`, { method: 'POST', body: { source: 'donor', donor_part_id: id } });
+        await afterFit('Taken off the donor');
+      })
+    );
+  }
+
+  if (source === 'purchased') {
+    $('#d-buy-add').addEventListener('click', (e) =>
+      busyish(e.target, async () => {
+        const description = $('#d-buy-what').value.trim();
+        if (!description) { toast('Say what was bought', true); return; }
+        await api(`/tickets/${t.id}/fitted`, {
+          method: 'POST',
+          body: {
+            source: 'purchased',
+            description,
+            vendor: $('#d-buy-vendor').value.trim(),
+            qty: Number($('#d-buy-qty').value) || 1,
+            unit_cost: $('#d-buy-cost').value,
+          },
+        });
+        await afterFit('Recorded');
+      })
+    );
+  }
+
+  $$('[data-unfit]').forEach((b) =>
     b.addEventListener('click', (e) =>
       busyish(e.target, async () => {
-        await api(`/tickets/${t.id}/parts`, {
-          method: 'POST',
-          body: { item_id: Number(b.dataset.partReturn), qty: Number(b.dataset.qty) || 1, direction: 'return' },
-        });
-        toast('Back on the shelf');
-        state.invData = null;
-        await refreshTicket();
+        await api(`/tickets/${t.id}/fitted/${b.dataset.unfit}`, { method: 'DELETE' });
+        await afterFit('Put back');
       })
     )
   );
@@ -1564,15 +1696,17 @@ async function busyish(btn, fn) {
 
 // ---------------------------------------------------------------- inventory
 const INV_TABS = [
-  { key: 'onhand', label: 'On hand' },
+  { key: 'onhand', label: 'Parts on hand' },
   { key: 'donors', label: 'Donor devices' },
-  { key: 'low', label: 'Low stock' },
+  { key: 'shopping', label: 'Shopping list' },
   { key: 'incoming', label: 'Incoming parts' },
 ];
 
 async function loadInventoryView(force = false) {
   renderInvTabs();
   $('#inv-add').textContent = state.invTab === 'incoming' ? 'New shipment' : state.invTab === 'donors' ? 'Add donor device' : 'Add part';
+  $('#inv-add').hidden = state.invTab === 'shopping';
+  $('#inv-search').parentElement.hidden = state.invTab === 'shopping' || state.invTab === 'incoming';
   const body = $('#inv-body');
   if (state.invTab === 'incoming') {
     if (!state.shipData || force) {
@@ -1584,17 +1718,29 @@ async function loadInventoryView(force = false) {
     renderShipments();
     return;
   }
+  if (state.invTab === 'shopping') {
+    if (!state.shopData || force) {
+      body.innerHTML = '<span class="spinner"></span> Loading&hellip;';
+      try { state.shopData = await api('/inventory/shopping-list'); }
+      catch (err) { body.innerHTML = `<div class="result-line err">${esc(err.message)}</div>`; return; }
+    }
+    if (!state.invData) { try { state.invData = await api('/inventory?kind=part'); } catch { /* stats only */ } }
+    if (state.invData) renderInvStats(state.invData.stats, false);
+    renderShoppingList();
+    return;
+  }
+
   if (!state.invData || force) {
     body.innerHTML = '<span class="spinner"></span> Loading&hellip;';
     const params = new URLSearchParams();
     if (state.invSearch.trim()) params.set('q', state.invSearch.trim());
-    if (state.invTab === 'donors') params.set('kind', 'donor_device');
-    if (state.invTab === 'low') params.set('low', '1');
+    // The two kinds are genuinely different things, so each tab shows one.
+    params.set('kind', state.invTab === 'donors' ? 'donor_device' : 'part');
     try { state.invData = await api('/inventory?' + params); }
     catch (err) { body.innerHTML = `<div class="result-line err">${esc(err.message)}</div>`; return; }
   }
   renderInvStats(state.invData.stats, false);
-  renderItems();
+  if (state.invTab === 'donors') renderDonors(); else renderParts();
 }
 
 function renderInvTabs() {
@@ -1622,60 +1768,221 @@ function renderInvStats(stats, incoming) {
     .join('');
 }
 
-function renderItems() {
+function renderParts() {
   const items = state.invData.items;
   const body = $('#inv-body');
   if (!items.length) {
-    body.innerHTML = `<div class="empty">Nothing here yet. ${state.invSearch ? 'Try a different search.' : 'Use the button above to add one.'}</div>`;
+    body.innerHTML = `<div class="empty">No parts yet. ${state.invSearch ? 'Try a different search.' : 'Use "Add part" above.'}</div>`;
     return;
   }
-  const donorTab = state.invTab === 'donors';
-  // Each row is labelled from ITS OWN kind, so a donor sitting in the mixed
-  // "On hand" list does not read as a part with empty part-only columns.
-  const row = (i) => {
-    const donor = i.kind === 'donor_device';
-    return `<tr data-item="${i.id}">
-      <td data-label="${donor ? 'Donor device' : 'Part'}"><b>${esc(i.name)}</b>
+  body.innerHTML = `<table class="bordered"><thead><tr>
+      <th>Part</th><th>Fits</th><th>Bin</th><th>On hand</th><th>Reorder at</th><th>Used (30d)</th><th></th>
+    </tr></thead><tbody>${items.map((i) => `<tr data-item="${i.id}">
+      <td data-label="Part"><b>${esc(i.name)}</b>
         ${i.part_number ? `<div class="small muted mono">${esc(i.part_number)}</div>` : ''}
         ${i.category ? `<div class="small muted">${esc(i.category)}</div>` : ''}</td>
-      <td data-label="${donor ? 'Serial / asset' : 'Fits'}" class="small">${esc(donor
-        ? [i.serial, i.asset_tag].filter(Boolean).join(' / ') || '-'
-        : i.fits_models || '-')}</td>
+      <td data-label="Fits" class="small">${esc(i.fits_models || '-')}</td>
       <td data-label="Bin">${esc(i.location || '-')}</td>
       <td data-label="On hand"><b style="${i.out_of_stock ? 'color:var(--danger)' : i.low_stock ? 'color:var(--warn)' : ''}">${esc(i.qty_on_hand)}</b>
         ${i.low_stock ? '<span class="small" style="color:var(--warn)"> low</span>' : ''}</td>
-      <td data-label="${donor ? 'Donor status' : 'Reorder at'}" class="small">${esc(donor ? i.donor_status || 'intact' : i.reorder_point || '-')}</td>
+      <td data-label="Reorder at" class="small">${esc(i.reorder_point || '-')}</td>
+      <td data-label="Used (30d)" class="small muted" data-usage="${i.id}">&middot;</td>
       <td class="row-actions">
         <button class="btn ghost sm" data-adj="${i.id}" data-d="1">+1</button>
         <button class="btn ghost sm" data-adj="${i.id}" data-d="-1">&minus;1</button>
-        ${donor ? `<button class="btn sm" data-harvest="${i.id}">Harvest</button>` : ''}
-        <button class="btn ghost sm" data-edit="${i.id}">Edit</button>
-        <button class="btn ghost sm" data-hist="${i.id}">History</button>
+        <button class="btn ghost sm" data-detail="${i.id}">Details</button>
       </td>
-    </tr>`;
-  };
-  body.innerHTML = `<table class="bordered"><thead><tr>
-      <th>${donorTab ? 'Donor device' : 'Part'}</th><th>${donorTab ? 'Serial / asset' : 'Fits'}</th>
-      <th>Bin</th><th>On hand</th><th>${donorTab ? 'Status' : 'Reorder at'}</th><th></th>
-    </tr></thead><tbody>${items.map(row).join('')}</tbody></table>`;
+    </tr>`).join('')}</tbody></table>`;
+  wireItemRows(items);
+}
 
+/**
+ * Donors are not parts: what matters is which machine it is, what has already
+ * come off it, and whether anything useful is left.
+ */
+function renderDonors() {
+  const items = state.invData.items;
+  const body = $('#inv-body');
+  if (!items.length) {
+    body.innerHTML = '<div class="empty">No donor devices. Add one when a machine is retired for spares.</div>';
+    return;
+  }
+  const STATE_COLOR = { intact: 'var(--ok)', harvested: 'var(--warn)', exhausted: 'var(--muted)' };
+  body.innerHTML = `<table class="bordered"><thead><tr>
+      <th>Donor device</th><th>Serial / asset</th><th>Condition</th><th>Taken so far</th><th>Where</th><th></th>
+    </tr></thead><tbody>${items.map((i) => `<tr data-item="${i.id}">
+      <td data-label="Donor"><b>${esc(i.name)}</b>
+        ${i.notes ? `<div class="small muted">${esc(i.notes.slice(0, 60))}</div>` : ''}</td>
+      <td data-label="Serial / asset" class="small mono">${esc([i.serial, i.asset_tag].filter(Boolean).join(' / ') || '-')}</td>
+      <td data-label="Condition"><span class="pill" style="background:${STATE_COLOR[i.donor_status] || 'var(--muted)'}">${esc(i.donor_status || 'intact')}</span></td>
+      <td data-label="Taken so far" class="small">${i.harvest_count
+        ? `${esc(i.harvest_count)} part${i.harvest_count === 1 ? '' : 's'}<div class="small muted">last ${esc(relTime(i.last_harvest_at))}</div>`
+        : '<span class="muted">nothing yet</span>'}</td>
+      <td data-label="Where">${esc(i.location || '-')}</td>
+      <td class="row-actions">
+        <button class="btn sm" data-harvest="${i.id}">Harvest</button>
+        <button class="btn ghost sm" data-detail="${i.id}">Details</button>
+      </td>
+    </tr>`).join('')}</tbody></table>`;
+  wireItemRows(items);
+}
+
+function wireItemRows(items) {
   const refresh = () => loadInventoryView(true);
   $$('#inv-body [data-adj]').forEach((b) =>
     b.addEventListener('click', async () => {
       b.disabled = true;
       try {
         await api(`/inventory/${b.dataset.adj}/adjust`, { method: 'POST', body: { delta: Number(b.dataset.d), reason: 'adjust', note: 'counted by hand' } });
+        state.shopData = null;
         await refresh();
       } catch (err) { toast(err.message, true); b.disabled = false; }
     })
   );
-  $$('#inv-body [data-edit]').forEach((b) =>
-    b.addEventListener('click', () => openItemForm(items.find((i) => i.id === Number(b.dataset.edit))))
-  );
-  $$('#inv-body [data-hist]').forEach((b) => b.addEventListener('click', () => showItemHistory(Number(b.dataset.hist))));
+  $$('#inv-body [data-detail]').forEach((b) => b.addEventListener('click', () => showItemDetail(Number(b.dataset.detail))));
   $$('#inv-body [data-harvest]').forEach((b) =>
     b.addEventListener('click', () => openHarvestForm(items.find((i) => i.id === Number(b.dataset.harvest))))
   );
+
+  // 30-day usage is a second query per row; fill it in after the table paints.
+  const ids = items.filter((i) => i.kind === 'part').map((i) => i.id);
+  if (ids.length) {
+    api('/inventory/shopping-list').then(({ items: low }) => {
+      const used = Object.fromEntries(low.map((i) => [i.id, i.used_30]));
+      $$('#inv-body [data-usage]').forEach((cell) => {
+        const id = Number(cell.dataset.usage);
+        cell.textContent = used[id] != null ? String(used[id]) : '';
+      });
+    }).catch(() => {});
+  }
+}
+
+/** The order you would actually place, not just a list of red numbers. */
+function renderShoppingList() {
+  const { items, text } = state.shopData;
+  const body = $('#inv-body');
+  if (!items.length) {
+    body.innerHTML = '<div class="empty">Nothing is at or below its reorder point. Well stocked.</div>';
+    return;
+  }
+  body.innerHTML = `
+    <div class="card">
+      <h2>${esc(items.length)} part${items.length === 1 ? '' : 's'} to reorder</h2>
+      <p class="small muted" style="margin-top:0">Suggested quantities get you back above the reorder point plus
+        about a month's usage, minus anything already on the way.</p>
+      <table class="bordered"><thead><tr>
+        <th>Part</th><th>On hand</th><th>On order</th><th>Used 30d</th><th>Used 90d</th><th>Cover left</th><th>Suggest</th>
+      </tr></thead><tbody>${items.map((i) => `<tr>
+        <td data-label="Part"><b>${esc(i.name)}</b>
+          ${i.part_number ? `<div class="small muted mono">${esc(i.part_number)}</div>` : ''}
+          ${i.fits_models ? `<div class="small muted">${esc(i.fits_models)}</div>` : ''}</td>
+        <td data-label="On hand"><b style="${i.out_of_stock ? 'color:var(--danger)' : 'color:var(--warn)'}">${esc(i.qty_on_hand)}</b></td>
+        <td data-label="On order">${esc(i.on_order || 0)}</td>
+        <td data-label="Used 30d">${esc(i.used_30)}</td>
+        <td data-label="Used 90d">${esc(i.used_90)}</td>
+        <td data-label="Cover left" class="small">${i.months_left == null ? '<span class="muted">not moving</span>' : `${esc(i.months_left)} months`}</td>
+        <td data-label="Suggest"><b>${esc(i.suggested_qty)}</b></td>
+      </tr>`).join('')}</tbody></table>
+      <div class="row" style="align-items:center;margin-top:12px">
+        <button class="btn" id="shop-copy" style="flex:0 0 auto">Copy as text</button>
+        <button class="btn ghost sm" id="shop-order" style="flex:0 0 auto">Start a shipment from this</button>
+        <div style="flex:1"></div>
+      </div>
+      <pre id="shop-text" class="small mono" style="white-space:pre-wrap;background:var(--panel-2);padding:12px;border-radius:8px;margin-top:12px">${esc(text)}</pre>
+    </div>`;
+
+  $('#shop-copy').addEventListener('click', async (e) => {
+    try { await navigator.clipboard.writeText(text); toast('Copied'); }
+    catch { toast('Select the text below and copy it', true); }
+  });
+  $('#shop-order').addEventListener('click', () => {
+    state.invTab = 'incoming';
+    openShipmentForm(null);
+    setTimeout(() => {
+      const notes = $('#s-notes');
+      if (notes) notes.value = text;
+    }, 60);
+  });
+}
+
+// --- device model picker -----------------------------------------------------
+// A search box that also lets you invent a model on the spot, because a new
+// Chromebook shows up in the fleet long before anyone thinks to add it here.
+const modelCache = { rows: [], loadedAt: 0 };
+
+async function allModels(force = false) {
+  if (!force && modelCache.rows.length && Date.now() - modelCache.loadedAt < 60000) return modelCache.rows;
+  const data = await api('/models');
+  modelCache.rows = data.models || [];
+  modelCache.loadedAt = Date.now();
+  return modelCache.rows;
+}
+
+/**
+ * Mounts into an element and returns { value() }.
+ *  multi:true  -> chips, for "which models does this part fit"
+ *  multi:false -> one model, for "what is this donor"
+ */
+function modelPicker(mount, { multi = true, selected = [], placeholder = 'Search models...' } = {}) {
+  const el = typeof mount === 'string' ? $(mount) : mount;
+  let chosen = selected.filter(Boolean).map((m) => (typeof m === 'string' ? { name: m } : { id: m.id, name: m.name }));
+  el.classList.add('modelpick');
+  el.innerHTML = `<div class="mp-chips"></div>
+    <div class="mp-input"><input type="text" class="mp-q" placeholder="${esc(placeholder)}" autocomplete="off">
+      <div class="mp-list" hidden></div></div>`;
+  const chips = el.querySelector('.mp-chips');
+  const input = el.querySelector('.mp-q');
+  const list = el.querySelector('.mp-list');
+
+  const drawChips = () => {
+    chips.innerHTML = chosen
+      .map((m, idx) => `<span class="mp-chip">${esc(m.name)}<button type="button" data-drop="${idx}" aria-label="Remove">x</button></span>`)
+      .join('');
+    chips.querySelectorAll('[data-drop]').forEach((b) =>
+      b.addEventListener('click', () => { chosen.splice(Number(b.dataset.drop), 1); drawChips(); }));
+    input.placeholder = !multi && chosen.length ? 'Change model...' : placeholder;
+  };
+
+  const pick = (model) => {
+    if (!model || !model.name) return;
+    if (!multi) chosen = [model];
+    else if (!chosen.some((m) => m.name.toLowerCase() === model.name.toLowerCase())) chosen.push(model);
+    input.value = '';
+    list.hidden = true;
+    drawChips();
+  };
+
+  const openList = async () => {
+    const q = input.value.trim().toLowerCase();
+    const rows = await allModels();
+    const hits = rows.filter((m) => !q || m.name.toLowerCase().includes(q)).slice(0, 8);
+    const exact = rows.some((m) => m.name.toLowerCase() === q);
+    const items = hits.map(
+      (m) => `<button type="button" class="mp-opt" data-name="${esc(m.name)}" data-id="${m.id}">${esc(m.name)}
+        ${m.part_count ? `<span class="small muted">${m.part_count} part${m.part_count === 1 ? '' : 's'}</span>` : ''}</button>`
+    );
+    if (q && !exact) items.unshift(`<button type="button" class="mp-opt mp-new" data-name="${esc(input.value.trim())}">+ Add "${esc(input.value.trim())}"</button>`);
+    list.innerHTML = items.join('') || '<div class="mp-empty small muted">Type a model name to add it</div>';
+    list.hidden = false;
+    list.querySelectorAll('.mp-opt').forEach((b) =>
+      b.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        pick({ id: b.dataset.id ? Number(b.dataset.id) : null, name: b.dataset.name });
+      }));
+  };
+
+  input.addEventListener('focus', openList);
+  input.addEventListener('input', openList);
+  input.addEventListener('blur', () => setTimeout(() => { list.hidden = true; }, 120));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); const first = list.querySelector('.mp-opt'); if (first) first.dispatchEvent(new MouseEvent('mousedown')); }
+    if (e.key === 'Backspace' && !input.value && chosen.length) { chosen.pop(); drawChips(); }
+  });
+  drawChips();
+  return {
+    value: () => (multi ? chosen.slice() : chosen[0] || null),
+    names: () => chosen.map((m) => m.name),
+  };
 }
 
 function openItemForm(item = null) {
@@ -1694,9 +2001,10 @@ function openItemForm(item = null) {
         ${donor
           ? `<label class="field"><span>Serial</span><input type="text" id="i-serial" value="${esc(item ? item.serial || '' : '')}"></label>
              <label class="field"><span>Asset tag</span><input type="text" id="i-asset" value="${esc(item ? item.asset_tag || '' : '')}"></label>
+             <label class="field" style="flex:2 1 260px"><span>Model</span><div id="i-model"></div></label>
              <label class="field"><span>Status</span><select id="i-donor-status">${(state.meta.inventory.donor_statuses || []).map((v) => `<option value="${esc(v)}"${item && item.donor_status === v ? ' selected' : ''}>${esc(v)}</option>`).join('')}</select></label>`
           : `<label class="field"><span>Category</span><select id="i-cat"><option value="">- none -</option>${cats.map((c) => `<option value="${esc(c)}"${item && item.category === c ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
-             <label class="field"><span>Fits which models</span><input type="text" id="i-fits" value="${esc(item ? item.fits_models || '' : '')}" placeholder="Lenovo 300e, 500e"></label>`}
+             <label class="field" style="flex:2 1 280px"><span>Fits which models</span><div id="i-fits"></div></label>`}
       </div>
       <div class="row">
         <label class="field"><span>Bin / location</span><input type="text" id="i-loc" value="${esc(item ? item.location || '' : '')}" placeholder="Bin A3"></label>
@@ -1711,6 +2019,16 @@ function openItemForm(item = null) {
   </div>`);
   $('[data-x=item-cancel]').addEventListener('click', close);
 
+  const picker = donor
+    ? modelPicker('#i-model', { multi: false, selected: item && item.model_name ? [{ id: item.model_id, name: item.model_name }] : [], placeholder: 'Lenovo 300e Gen 3...' })
+    : modelPicker('#i-fits', {
+        multi: true,
+        selected: (item && item.models && item.models.length
+          ? item.models
+          : String((item && item.fits_models) || '').split(',').map((x) => x.trim()).filter(Boolean)),
+        placeholder: 'Lenovo 300e, HP G8...',
+      });
+
   const collect = () => {
     const body = {
       name: $('#i-name').value.trim(),
@@ -1722,10 +2040,12 @@ function openItemForm(item = null) {
       body.serial = cleanScan($('#i-serial').value);
       body.asset_tag = cleanScan($('#i-asset').value);
       body.donor_status = $('#i-donor-status').value;
+      const chosen = picker.value();
+      body.model_name = chosen ? chosen.name : '';
     } else {
       body.part_number = $('#i-pn').value.trim();
       body.category = $('#i-cat').value;
-      body.fits_models = $('#i-fits').value.trim();
+      body.fits_models = picker.names().join(', ');
       body.reorder_point = Number($('#i-reorder').value) || 0;
     }
     if (!item) body.qty_on_hand = Number($('#i-qty').value) || 0;
@@ -1735,8 +2055,12 @@ function openItemForm(item = null) {
   $('#i-save').addEventListener('click', async (e) => {
     e.target.disabled = true;
     try {
-      if (item) await api('/inventory/' + item.id, { method: 'PATCH', body: collect() });
-      else await api('/inventory', { method: 'POST', body: collect() });
+      const body = collect();
+      const saved = item
+        ? (await api('/inventory/' + item.id, { method: 'PATCH', body })).item
+        : (await api('/inventory', { method: 'POST', body })).item;
+      if (!donor && saved) await api('/inventory/' + saved.id + '/models', { method: 'PUT', body: { models: picker.names() } });
+      modelCache.loadedAt = 0;
       toast(item ? 'Saved' : 'Added to inventory');
       close();
       await loadInventoryView(true);
@@ -1760,25 +2084,192 @@ function openItemForm(item = null) {
   }
 }
 
-async function showItemHistory(id) {
-  const { item, moves } = await api('/inventory/' + id);
+/** Everything about one item: stock, movement, what it went into, what is coming. */
+async function showItemDetail(id) {
+  const { item } = await api('/inventory/' + id);
+  const donor = item.kind === 'donor_device';
+
+  const facts = donor
+    ? [
+        ['Serial', item.serial], ['Asset tag', item.asset_tag], ['Condition', item.donor_status || 'intact'],
+        ['Where', item.location], ['Parts taken', item.harvests.length],
+      ]
+    : [
+        ['Part number', item.part_number], ['Category', item.category], ['Fits', item.fits_models],
+        ['Bin', item.location], ['On hand', item.qty_on_hand], ['Reorder at', item.reorder_point || '-'],
+        ['On order', item.on_order], ['Used, 30 days', item.usage_30.used], ['Used, 90 days', item.usage_90.used],
+        ['Last received', item.last_received ? relTime(item.last_received.created_at) : 'never'],
+      ];
+
   const { close } = subOverlay(`<div class="modal">
-    <header><h2>${esc(item.name)}</h2><div style="flex:1"></div>
-      <button class="btn ghost sm" data-x="hist-close">Close</button></header>
+    <header><h2>${esc(item.name)}</h2>
+      ${item.low_stock ? '<span class="pill" style="background:var(--warn)">low stock</span>' : ''}
+      <div style="flex:1"></div>
+      <button class="btn ghost sm" id="detail-edit">Edit</button>
+      <button class="btn ghost sm" data-x="detail-close">Close</button></header>
     <div class="body">
-      <p class="small muted" style="margin-top:0">${esc(item.qty_on_hand)} on hand${item.location ? ` in ${esc(item.location)}` : ''}
-        ${item.reorder_point ? ` &middot; reorder at ${esc(item.reorder_point)}` : ''}</p>
-      ${moves.length
+      ${item.notes ? `<p class="small muted" style="margin-top:0;white-space:pre-wrap">${esc(item.notes)}</p>` : ''}
+      <dl class="kv">${facts.filter(([, v]) => v !== null && v !== undefined && v !== '')
+        .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
+
+      ${donor ? '<div id="donor-deprov"></div><div id="donor-parts"></div>' : ''}
+
+      ${donor && item.harvests.length ? `<h2 style="font-size:14px;margin:18px 0 6px">What has come off it</h2>
+        <ul class="small" style="margin:0;padding-left:18px">${item.harvests.map((h) => `<li>${esc(h.note || 'a part')}
+          <span class="muted">&middot; ${esc(relTime(h.created_at))}${h.ticket_id ? ` &middot; #${esc(h.ticket_id)}` : ''}</span></li>`).join('')}</ul>` : ''}
+
+      ${item.tickets.length ? `<h2 style="font-size:14px;margin:18px 0 6px">Repairs it went into</h2>
+        <ul class="small" style="margin:0;padding-left:18px">${item.tickets.map((t) => `<li>
+          <a href="#" data-goto="${t.ticket_id}">#${esc(t.ticket_id)}</a> ${esc(t.issue_category || '')}
+          <span class="muted">${esc(t.asset_tag || '')} &middot; ${esc(relTime(t.created_at))}</span></li>`).join('')}</ul>` : ''}
+
+      <h2 style="font-size:14px;margin:18px 0 6px">Movement</h2>
+      ${item.moves.length
         ? `<table class="bordered"><thead><tr><th>When</th><th>Change</th><th>Why</th><th>Ticket</th><th>Who</th></tr></thead>
-           <tbody>${moves.map((m) => `<tr>
+           <tbody>${item.moves.map((m) => `<tr>
              <td class="small" data-label="When">${esc(relTime(m.created_at))}</td>
              <td data-label="Change" style="color:${m.delta < 0 ? 'var(--danger)' : m.delta > 0 ? 'var(--ok)' : 'var(--muted)'}">${m.delta > 0 ? '+' : ''}${esc(m.delta)}</td>
              <td class="small" data-label="Why">${esc(m.reason)}${m.note ? ` &middot; ${esc(m.note)}` : ''}</td>
              <td class="small" data-label="Ticket">${m.ticket_id ? `#${esc(m.ticket_id)}` : '-'}</td>
              <td class="small muted" data-label="Who">${esc(m.author || 'system')}</td></tr>`).join('')}</tbody></table>`
         : '<p class="small muted">No movements yet.</p>'}
-    </div></div>`);
-  $('[data-x=hist-close]').addEventListener('click', close);
+    </div>
+    <footer>
+      <button class="btn ghost sm" id="detail-adjust-down">&minus;1</button>
+      <button class="btn ghost sm" id="detail-adjust-up">+1</button>
+      <div style="flex:1"></div>
+      ${donor ? '<button class="btn" id="detail-harvest">Harvest a part</button>' : ''}
+    </footer>
+  </div>`);
+
+  $('[data-x=detail-close]').addEventListener('click', close);
+  $('#detail-edit').addEventListener('click', () => { close(); openItemForm(item); });
+  $$('[data-goto]').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); close(); openTicket(Number(a.dataset.goto)); }));
+  const bump = async (delta) => {
+    try {
+      await api(`/inventory/${id}/adjust`, { method: 'POST', body: { delta, reason: 'adjust', note: 'counted by hand' } });
+      close();
+      state.shopData = null;
+      await loadInventoryView(true);
+      showItemDetail(id);
+    } catch (err) { toast(err.message, true); }
+  };
+  $('#detail-adjust-up').addEventListener('click', () => bump(1));
+  $('#detail-adjust-down').addEventListener('click', () => bump(-1));
+  if ($('#detail-harvest')) $('#detail-harvest').addEventListener('click', () => { close(); openHarvestForm(item); });
+  if (donor) {
+    renderDonorParts(item);
+    checkDeprovision(item);
+  }
+}
+
+const PART_STATE_COLOR = { available: 'var(--ok)', taken: 'var(--muted)', broken: 'var(--danger)' };
+
+/** The salvage list for one donor: what is still on it, what has gone where. */
+async function renderDonorParts(donor) {
+  const mount = $('#donor-parts');
+  if (!mount) return;
+  const { parts, suggestions } = await api('/inventory/' + donor.id + '/parts');
+  const left = parts.filter((p) => p.state === 'available').length;
+  mount.innerHTML = `<h2 style="font-size:14px;margin:18px 0 6px">Salvageable parts
+      <span class="muted" style="font-weight:400">${left} still on it</span></h2>
+    ${parts.length
+      ? `<table class="bordered"><tbody>${parts.map((p) => `<tr>
+          <td data-label="Part">${esc(p.label)}${p.note ? `<div class="small muted">${esc(p.note)}</div>` : ''}</td>
+          <td data-label="State"><span class="pill" style="background:${PART_STATE_COLOR[p.state]}">${esc(p.state)}</span></td>
+          <td class="small muted" data-label="Where it went">${p.state === 'taken'
+            ? `${p.taken_ticket_id ? `<a href="#" data-goto="${p.taken_ticket_id}">#${esc(p.taken_ticket_id)}</a>` : 'taken'}
+               ${p.taken_at ? esc(relTime(p.taken_at)) : ''}`
+            : ''}</td>
+          <td style="text-align:right;white-space:nowrap">
+            ${p.state === 'available'
+              ? `<button class="btn ghost sm" data-pstate="broken" data-pid="${p.id}">Broken</button>`
+              : `<button class="btn ghost sm" data-pstate="available" data-pid="${p.id}">Back on</button>`}
+            <button class="btn ghost sm danger" data-pdel="${p.id}">Remove</button></td></tr>`).join('')}</tbody></table>`
+      : '<p class="small muted">Nothing listed yet. Tick what is worth keeping below.</p>'}
+    <div class="row" style="margin-top:8px;align-items:flex-end">
+      <label class="field" style="flex:2 1 220px"><span>Add a part</span>
+        <input type="text" id="dp-new" placeholder="wifi card, good bezel screws"
+          list="dp-suggest"></label>
+      <button class="btn sm" id="dp-add" style="flex:0 0 auto">Add</button>
+      ${suggestions.length ? `<button class="btn ghost sm" id="dp-all" style="flex:0 0 auto">Add all ${suggestions.length} from this model</button>` : ''}
+    </div>
+    <datalist id="dp-suggest">${suggestions.map((sug) => `<option value="${esc(sug.label || sug.name)}">`).join('')}</datalist>
+    ${suggestions.length
+      ? `<div class="small muted" style="margin-top:4px">This model's parts: ${suggestions.map((sug) => `<button type="button" class="linkish" data-sug="${sug.id}" data-suglabel="${esc(sug.label || sug.name)}">${esc(sug.label || sug.name)}</button>`).join(', ')}</div>`
+      : '<div class="small muted" style="margin-top:4px">Set this donor\'s model to get a tick list of the parts that fit it.</div>'}`;
+
+  const reload = async () => { await renderDonorParts(donor); };
+  const add = async (entries) => {
+    try { await api('/inventory/' + donor.id + '/parts', { method: 'POST', body: { parts: entries } }); await reload(); }
+    catch (err) { toast(err.message, true); }
+  };
+  mount.querySelectorAll('[data-pstate]').forEach((b) => b.addEventListener('click', async () => {
+    await api(`/inventory/${donor.id}/parts/${b.dataset.pid}`, { method: 'PATCH', body: { state: b.dataset.pstate } });
+    await reload();
+  }));
+  mount.querySelectorAll('[data-pdel]').forEach((b) => b.addEventListener('click', async () => {
+    await api(`/inventory/${donor.id}/parts/${b.dataset.pdel}`, { method: 'DELETE' });
+    await reload();
+  }));
+  mount.querySelectorAll('[data-sug]').forEach((b) => b.addEventListener('click', () =>
+    add([{ item_id: Number(b.dataset.sug), label: b.dataset.suglabel }])));
+  $('#dp-add').addEventListener('click', () => {
+    const label = $('#dp-new').value.trim();
+    if (!label) return;
+    const match = suggestions.find((sug) => (sug.label || sug.name).toLowerCase() === label.toLowerCase());
+    add([match ? { item_id: match.id, label } : { label }]);
+  });
+  if ($('#dp-all')) $('#dp-all').addEventListener('click', () => add(suggestions.map((sug) => ({ item_id: sug.id, label: sug.label || sug.name }))));
+  mount.querySelectorAll('[data-goto]').forEach((a) => a.addEventListener('click', (e) => {
+    e.preventDefault();
+    const ov = document.querySelector('#sub-overlay');
+    if (ov) ov.remove();
+    openTicket(Number(a.dataset.goto));
+  }));
+}
+
+/**
+ * A donor still active in Google Admin is a licence we are paying for on a
+ * machine that is being taken apart, so say so - loudly but not in the way.
+ */
+async function checkDeprovision(donor) {
+  const mount = $('#donor-deprov');
+  if (!mount || !donor.device_id) return;
+  let data;
+  try { data = await api('/devices/' + encodeURIComponent(donor.device_id) + '/deprovision'); }
+  catch { return; }
+  const check = data.check || {};
+  if (!check.known || check.deprovisioned) {
+    if (check.deprovisioned) mount.innerHTML = '<p class="small muted">Deprovisioned in Google Admin.</p>';
+    return;
+  }
+  mount.innerHTML = `<div class="banner warn">
+    <strong>Still enrolled in Google Admin</strong> - this donor shows as ${esc(check.status || 'active')},
+    so it is still holding a licence.
+    ${check.admin_url ? `<a href="${esc(check.admin_url)}" target="_blank" rel="noopener">Open in Admin</a>` : ''}
+    <div class="row" style="margin-top:8px;align-items:flex-end">
+      <label class="field" style="flex:1 1 220px"><span>Reason</span>
+        <select id="dep-reason">${(data.reasons || []).map((r) => `<option value="${esc(r.value)}">${esc(r.label)}</option>`).join('')}</select></label>
+      <button class="btn danger sm" id="dep-go" style="flex:0 0 auto"${check.writeback_enabled ? '' : ' disabled title="Device write-back is turned off"'}>Deprovision</button>
+    </div>
+    ${check.writeback_enabled ? '' : '<div class="small muted">Turn on ALLOW_DEVICE_WRITEBACK to do this from here.</div>'}</div>`;
+  const go = $('#dep-go');
+  if (!go) return;
+  go.addEventListener('click', async () => {
+    // One-way in Google, so ask for the tag rather than a bare OK.
+    const tag = donor.asset_tag || donor.serial || donor.name;
+    const typed = window.prompt(`Deprovisioning cannot be undone. Type ${tag} to confirm.`);
+    if (!typed || typed.trim().toLowerCase() !== String(tag).trim().toLowerCase()) return toast('Not confirmed', true);
+    go.disabled = true;
+    try {
+      await api('/devices/' + encodeURIComponent(donor.device_id) + '/deprovision', {
+        method: 'POST', body: { reason: $('#dep-reason').value, confirm: true },
+      });
+      toast('Deprovisioned in Google Admin');
+      await checkDeprovision(donor);
+    } catch (err) { toast(err.message, true); go.disabled = false; }
+  });
 }
 
 function openHarvestForm(donor) {

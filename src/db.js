@@ -15,6 +15,7 @@ function open(dbPath = config.dbPath) {
   handle.pragma('foreign_keys = ON');
   migrate(handle);
   migrateColumns(handle);
+  migrateData(handle);
   seedTemplates(handle);
   return handle;
 }
@@ -64,7 +65,7 @@ function migrate(handle) {
       user_name         TEXT,
       issue_category    TEXT,
       issue_description TEXT NOT NULL,
-      status            TEXT NOT NULL DEFAULT 'new',
+      status            TEXT NOT NULL DEFAULT 'received',
       priority          TEXT NOT NULL DEFAULT 'normal',
       assigned_to       TEXT,
       location          TEXT,
@@ -144,6 +145,63 @@ function migrate(handle) {
     );
     CREATE INDEX IF NOT EXISTS idx_items_kind ON inventory_items(kind, archived);
     CREATE INDEX IF NOT EXISTS idx_items_name ON inventory_items(name);
+
+    -- Device models as records, so a part can say what it fits and a donor can
+    -- say what it is. Seeded from the models already in the Google fleet.
+    CREATE TABLE IF NOT EXISTS device_models (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      name         TEXT NOT NULL UNIQUE,
+      short_name   TEXT,
+      manufacturer TEXT,
+      notes        TEXT,
+      archived     INTEGER NOT NULL DEFAULT 0,
+      created_at   TEXT NOT NULL,
+      updated_at   TEXT NOT NULL
+    );
+
+    -- Parts fit many models and models take many parts: a 45W charger fits the
+    -- whole fleet, a 300e screen fits one thing.
+    CREATE TABLE IF NOT EXISTS item_models (
+      item_id  INTEGER NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
+      model_id INTEGER NOT NULL REFERENCES device_models(id) ON DELETE CASCADE,
+      PRIMARY KEY (item_id, model_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_item_models_model ON item_models(model_id);
+
+    -- What is worth taking off one particular donor carcass, and what has gone.
+    CREATE TABLE IF NOT EXISTS donor_parts (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      donor_id       INTEGER NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
+      item_id        INTEGER REFERENCES inventory_items(id) ON DELETE SET NULL,
+      label          TEXT NOT NULL,
+      state          TEXT NOT NULL DEFAULT 'available',  -- available | taken | broken
+      taken_ticket_id INTEGER REFERENCES tickets(id) ON DELETE SET NULL,
+      taken_at       TEXT,
+      taken_by       TEXT,
+      note           TEXT,
+      created_at     TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_donor_parts ON donor_parts(donor_id, state);
+
+    -- The bill of materials for a repair: what went in, where it came from, and
+    -- what it cost. Kept separate from stock_moves, which is the stock ledger -
+    -- a part bought for one repair never touches the shelf but still belongs here.
+    CREATE TABLE IF NOT EXISTS ticket_parts (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      ticket_id     INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+      source        TEXT NOT NULL,          -- stock | donor | purchased
+      item_id       INTEGER REFERENCES inventory_items(id) ON DELETE SET NULL,
+      donor_id      INTEGER REFERENCES inventory_items(id) ON DELETE SET NULL,
+      donor_part_id INTEGER REFERENCES donor_parts(id) ON DELETE SET NULL,
+      description   TEXT NOT NULL,
+      qty           INTEGER NOT NULL DEFAULT 1,
+      unit_cost     REAL,
+      vendor        TEXT,
+      author        TEXT,
+      created_at    TEXT NOT NULL,
+      removed_at    TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_ticket_parts ON ticket_parts(ticket_id, id);
 
     -- Every change to a count, with why and for which ticket. The count on the
     -- item is the running total; this is the audit trail behind it.
@@ -253,7 +311,74 @@ function migrate(handle) {
   `);
 }
 
+/**
+ * One-way data fixes that go with a rename or a reshape. Each is written to be
+ * safe to run again: the app has no migration table, and a check that costs a
+ * millisecond is better than a version number to keep in step.
+ */
+function migrateData(handle) {
+  // Movements that were recorded against a ticket before ticket_parts existed
+  // become rows in the bill of materials, so nothing disappears from a repair.
+  const orphaned = handle
+    .prepare(
+      `SELECT m.id, m.item_id, m.ticket_id, m.delta, m.reason, m.author, m.created_at, i.name, i.part_number
+         FROM stock_moves m JOIN inventory_items i ON i.id = m.item_id
+        WHERE m.ticket_id IS NOT NULL AND m.reason = 'use'
+          AND NOT EXISTS (SELECT 1 FROM ticket_parts p WHERE p.ticket_id = m.ticket_id AND p.item_id = m.item_id)`
+    )
+    .all();
+  if (orphaned.length) {
+    const insert = handle.prepare(
+      `INSERT INTO ticket_parts (ticket_id, source, item_id, description, qty, author, created_at)
+       VALUES (?, 'stock', ?, ?, ?, ?, ?)`
+    );
+    const run = handle.transaction(() => {
+      for (const m of orphaned) {
+        insert.run(m.ticket_id, m.item_id, m.part_number ? `${m.name} (${m.part_number})` : m.name,
+          Math.abs(m.delta) || 1, m.author, m.created_at);
+      }
+    });
+    run();
+    console.log(`  moved ${orphaned.length} fitted part(s) into the ticket parts list`);
+  }
+
+  // `new` -> `received`. The label was meaningless to students, and the key
+  // followed the label. Tickets, their history, the template and every ticket's
+  // notification list all carry the status, so all four move together.
+  const stale = handle.prepare("SELECT COUNT(*) AS n FROM tickets WHERE status = 'new'").get().n
+    + handle.prepare("SELECT COUNT(*) AS n FROM email_templates WHERE status_key = 'new'").get().n;
+  if (stale > 0) {
+    const run = handle.transaction(() => {
+      handle.prepare("UPDATE tickets SET status = 'received' WHERE status = 'new'").run();
+      handle.prepare("UPDATE ticket_events SET to_status = 'received' WHERE to_status = 'new'").run();
+      handle.prepare("UPDATE ticket_events SET from_status = 'received' WHERE from_status = 'new'").run();
+      // Keep the wording the school edited: rename the row rather than reseeding.
+      const existingNew = handle.prepare("SELECT 1 FROM email_templates WHERE status_key = 'new'").get();
+      const existingReceived = handle.prepare("SELECT 1 FROM email_templates WHERE status_key = 'received'").get();
+      if (existingNew && !existingReceived) {
+        handle.prepare("UPDATE email_templates SET status_key = 'received' WHERE status_key = 'new'").run();
+      } else if (existingNew) {
+        handle.prepare("DELETE FROM email_templates WHERE status_key = 'new'").run();
+      }
+      // notify_statuses is a JSON array of status keys.
+      handle.prepare(
+        `UPDATE tickets SET notify_statuses = REPLACE(notify_statuses, '"new"', '"received"')
+          WHERE notify_statuses LIKE '%"new"%'`
+      ).run();
+      handle.prepare("UPDATE email_log SET status_key = 'received' WHERE status_key = 'new'").run();
+    });
+    run();
+    console.log(`  migrated ${stale} row(s) from the old "new" status to "received"`);
+  }
+}
+
 function migrateColumns(handle) {
+  // Which model a donor carcass is, so its salvageable parts can be offered.
+  addColumn(handle, 'inventory_items', 'model_id', 'INTEGER');
+  // Provenance and money on a stock movement.
+  addColumn(handle, 'stock_moves', 'source', 'TEXT');
+  addColumn(handle, 'stock_moves', 'unit_cost', 'REAL');
+
   // Automatic carrier tracking.
   addColumn(handle, 'shipments', 'tracking_status', 'TEXT');
   addColumn(handle, 'shipments', 'tracking_polled_at', 'TEXT');

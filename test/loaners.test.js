@@ -253,12 +253,12 @@ test('resetting templates restores the shipped wording but keeps auto-send choic
   await srv.call('/api/templates/closed', { method: 'PUT', body: { subject: 'mangled', body: '<p>mangled</p>', auto_send: true } });
   const res = await srv.call('/api/templates/reset', { method: 'POST', body: {} });
   assert.equal(res.status, 200);
-  assert.equal(res.body.changed, 14, 'eight status emails, three loaner reminders, three parts notices');
+  assert.equal(res.body.changed, 16, 'ten status emails, three loaner reminders, three parts notices');
 
   const closed = (await srv.call('/api/templates')).body.templates.find((t) => t.status_key === 'closed');
   assert.equal(closed.subject, DEFAULT_TEMPLATES.closed.subject);
   assert.equal(closed.auto_send, 1, 'the auto-send switch the tech set is kept');
-  assert.equal(getDb().prepare("SELECT COUNT(*) n FROM email_templates").get().n, 14);
+  assert.equal(getDb().prepare("SELECT COUNT(*) n FROM email_templates").get().n, 16);
 });
 
 test('resetTemplates can also restore the shipped auto-send defaults', () => {

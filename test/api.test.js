@@ -34,7 +34,7 @@ test('template rendering substitutes placeholders and escapes values', () => {
 });
 
 test('first name falls back to the email local part', () => {
-  const vars = mailer.buildVars({ id: 1, status: 'new', priority: 'normal', user_email: 'jane.doe@example.org', issue_description: 'x' });
+  const vars = mailer.buildVars({ id: 1, status: 'received', priority: 'normal', user_email: 'jane.doe@example.org', issue_description: 'x' });
   assert.equal(vars.first_name, 'Jane');
 });
 
@@ -42,7 +42,7 @@ test('creating a ticket logs an event and sends the New template (dry run)', asy
   const res = await srv.call('/api/tickets', { method: 'POST', body: newTicket() });
   assert.equal(res.status, 201);
   const t = res.body.ticket;
-  assert.equal(t.status, 'new');
+  assert.equal(t.status, 'received');
   assert.equal(t.priority, 'high');
   assert.equal(res.body.email.result, 'dry_run', JSON.stringify(res.body.email));
 
@@ -220,4 +220,31 @@ test('tickets can be deleted', async () => {
   const { body: created } = await srv.call('/api/tickets', { method: 'POST', body: newTicket({ notify: false }) });
   assert.equal((await srv.call('/api/tickets/' + created.ticket.id, { method: 'DELETE' })).status, 200);
   assert.equal((await srv.call('/api/tickets/' + created.ticket.id)).status, 404);
+});
+
+// ---- the new -> received rename --------------------------------------------
+
+test('a ticket opens as "received", not "new"', async () => {
+  const res = await srv.call('/api/tickets', { method: 'POST', body: newTicket({ notify: false }) });
+  assert.equal(res.body.ticket.status, 'received');
+  const { STATUSES } = require('../src/lib/statuses');
+  assert.equal(STATUSES.find((s) => s.key === 'received').label, 'Received');
+  assert.equal(STATUSES.some((s) => s.key === 'new'), false, 'the old key is gone from the workflow');
+});
+
+test('the old key still works where it might be typed or bookmarked', async () => {
+  const { canonicalStatus } = require('../src/lib/statuses');
+  assert.equal(canonicalStatus('new'), 'received');
+  assert.equal(canonicalStatus('closed'), 'closed');
+
+  // a saved filter link
+  const filtered = await srv.call('/api/tickets?status=new');
+  assert.equal(filtered.status, 200);
+  assert.ok(filtered.body.tickets.every((t) => t.status === 'received'));
+
+  // and an API caller setting it
+  const { body: made } = await srv.call('/api/tickets', { method: 'POST', body: newTicket({ notify: false }) });
+  const patched = await srv.call('/api/tickets/' + made.ticket.id, { method: 'PATCH', body: { status: 'new', notify: false } });
+  assert.equal(patched.status, 200);
+  assert.equal(patched.body.ticket.status, 'received');
 });
