@@ -288,42 +288,47 @@ router.get('/loans', (req, res) => {
   });
 });
 
-router.post('/loans', async (req, res, next) => {
-  try {
-    const body = { ...(req.body || {}) };
-    // A scanned or typed loaner tag is resolved against the loaner org unit, so
-    // the loan carries the real Google device rather than free text.
-    if (body.loaner_asset_tag && !body.loaner_device_id) {
-      try {
-        const hits = await google.searchLoaners(body.loaner_asset_tag, { limit: 5 });
-        const exact = hits.find((d) => d.exact) || (hits.length === 1 ? hits[0] : null);
-        if (exact) {
-          body.loaner_device_id = exact.device_id;
-          body.loaner_asset_tag = exact.asset_tag || body.loaner_asset_tag;
-          body.loaner_serial = exact.serial || body.loaner_serial || null;
-          body.loaner_model = exact.model || body.loaner_model || null;
-        } else {
-          body.loaner_asset_tag = google.normalizeLoanerTag(body.loaner_asset_tag);
-        }
-      } catch {
-        // Google being unreachable must not stop a tech handing out a machine.
+/**
+ * Turn typed or scanned asset tags into real Google devices. Used by both the
+ * dispatch and the edit routes, because correcting a mis-scanned tag needs
+ * exactly the same lookup that creating it did.
+ */
+async function resolveDevices(body) {
+  if (body.loaner_asset_tag && !body.loaner_device_id) {
+    try {
+      const hits = await google.searchLoaners(body.loaner_asset_tag, { limit: 5 });
+      const exact = hits.find((d) => d.exact) || (hits.length === 1 ? hits[0] : null);
+      if (exact) {
+        body.loaner_device_id = exact.device_id;
+        body.loaner_asset_tag = exact.asset_tag || body.loaner_asset_tag;
+        body.loaner_serial = exact.serial || body.loaner_serial || null;
+        body.loaner_model = exact.model || body.loaner_model || null;
+      } else {
         body.loaner_asset_tag = google.normalizeLoanerTag(body.loaner_asset_tag);
       }
+    } catch {
+      // Google being unreachable must not stop a tech handing out a machine.
+      body.loaner_asset_tag = google.normalizeLoanerTag(body.loaner_asset_tag);
     }
-    // Same for the student's own device, looked up across the whole fleet.
-    if (body.own_asset_tag && !body.own_device_id) {
-      try {
-        const hits = await google.searchDevices(body.own_asset_tag, { limit: 5 });
-        const exact = hits.find((d) => d.exact) || (hits.length === 1 ? hits[0] : null);
-        if (exact) {
-          body.own_device_id = exact.device_id;
-          body.own_asset_tag = exact.asset_tag || body.own_asset_tag;
-          body.own_serial = exact.serial || body.own_serial || null;
-          body.own_model = exact.model || body.own_model || null;
-        }
-      } catch { /* free text is fine */ }
-    }
+  }
+  if (body.own_asset_tag && !body.own_device_id) {
+    try {
+      const hits = await google.searchDevices(body.own_asset_tag, { limit: 5 });
+      const exact = hits.find((d) => d.exact) || (hits.length === 1 ? hits[0] : null);
+      if (exact) {
+        body.own_device_id = exact.device_id;
+        body.own_asset_tag = exact.asset_tag || body.own_asset_tag;
+        body.own_serial = exact.serial || body.own_serial || null;
+        body.own_model = exact.model || body.own_model || null;
+      }
+    } catch { /* free text is fine */ }
+  }
+  return body;
+}
 
+router.post('/loans', async (req, res, next) => {
+  try {
+    const body = await resolveDevices({ ...(req.body || {}) });
     const loan = loans.issue(body, { author: authorOf(req), force: Boolean(body.force) });
     // Best effort, and after the loan is safely recorded.
     const note = await loans.noteOnLoaner(
@@ -343,10 +348,61 @@ router.get('/loans/:id', (req, res) => {
   res.json({ loan, reasons: loans.REASONS, own_device_states: loans.OWN_DEVICE_STATES });
 });
 
-router.patch('/loans/:id', (req, res) => {
-  const loan = loans.update(Number(req.params.id), req.body || {}, { author: authorOf(req) });
+router.patch('/loans/:id', async (req, res, next) => {
+  try {
+    const body = { ...(req.body || {}) };
+    // Only look things up when the tag actually changed, so a save that touches
+    // the reason alone does not spend a Google call.
+    const current = loans.get(Number(req.params.id));
+    if (!current) return res.status(404).json({ error: 'No such loan' });
+    if (body.loaner_asset_tag && body.loaner_asset_tag !== current.loaner_asset_tag) {
+      delete body.loaner_device_id;
+      delete body.loaner_serial;
+    } else {
+      delete body.loaner_asset_tag;
+    }
+    if (body.own_asset_tag && body.own_asset_tag !== current.own_asset_tag) {
+      delete body.own_device_id;
+      delete body.own_serial;
+    } else if (!body.own_asset_tag && 'own_asset_tag' in body) {
+      // Cleared on purpose: forget the whole device, not just its tag.
+      body.own_device_id = null;
+      body.own_serial = null;
+      body.own_model = null;
+    } else {
+      delete body.own_asset_tag;
+    }
+    await resolveDevices(body);
+    const loan = loans.update(Number(req.params.id), body, { author: authorOf(req) });
+    res.json({ loan });
+  } catch (err) {
+    if (err.statusCode === 409) return res.status(409).json({ error: err.message });
+    next(err);
+  }
+});
+
+/**
+ * Tickets worth offering when attaching this loan to a repair: the borrower's
+ * own, newest first. Saves hunting for a number in another tab.
+ */
+router.get('/loans/:id/ticket-options', (req, res) => {
+  const loan = loans.get(Number(req.params.id));
   if (!loan) return res.status(404).json({ error: 'No such loan' });
-  res.json({ loan });
+  const email = loan.borrower_email || '';
+  // 'all' so a closed ticket that is already attached still shows up; anything
+  // else closed is noise when you are looking for the repair to link.
+  const rows = email
+    ? tickets.list({ q: email, status: 'all', limit: 25 }).tickets
+      .filter((t) => !t.closed_at || t.id === loan.ticket_id)
+    : [];
+  res.json({
+    tickets: rows.map((t) => ({
+      id: t.id, status: t.status, asset_tag: t.asset_tag, model: t.model,
+      issue_category: t.issue_category, issue_description: t.issue_description,
+      created_at: t.created_at,
+    })),
+    attached: loan.ticket_id,
+  });
 });
 
 router.post('/loans/:id/return', async (req, res, next) => {

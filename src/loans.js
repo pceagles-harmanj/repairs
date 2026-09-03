@@ -315,12 +315,23 @@ function returnLoan(id, { author = null, condition = 'ok', note = null, at = nul
   return get(id);
 }
 
-const EDITABLE = ['borrower_email', 'borrower_name', 'reason', 'reason_note', 'loaner_model',
+/**
+ * What can be changed after the loaner has gone out.
+ *
+ * The loaner's own identity is in here on purpose: the commonest correction is a
+ * mis-scanned or mistyped asset tag, and refusing to fix that just means the
+ * list is wrong forever. Swapping to a different machine is guarded below.
+ */
+const EDITABLE = ['borrower_email', 'borrower_name', 'reason', 'reason_note',
+  'loaner_device_id', 'loaner_asset_tag', 'loaner_serial', 'loaner_model',
   'own_device_id', 'own_asset_tag', 'own_serial', 'own_model', 'own_device_state', 'due_at'];
+
+const IDENTITY = ['loaner_device_id', 'loaner_asset_tag', 'loaner_serial'];
 
 function update(id, patch = {}, { author = null } = {}) {
   const before = get(id);
   if (!before) return null;
+
   if ('reason' in patch) {
     const meta = reasonMeta(String(patch.reason || '').trim());
     if (!meta) throw badRequest(`Unknown reason "${patch.reason}"`);
@@ -329,9 +340,31 @@ function update(id, patch = {}, { author = null } = {}) {
       throw badRequest(`"${meta.label}" needs a short note saying what happened`);
     }
   }
+  if ('borrower_email' in patch && !String(patch.borrower_email || '').trim()) {
+    throw badRequest('A loan needs an email address, or nobody can be reminded about it');
+  }
   if (patch.due_at) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(patch.due_at))) throw badRequest('A due date must look like 2026-09-10');
   }
+
+  // Pointing this loan at a different machine must not double-book one that is
+  // already out. Correcting a typo on the same machine is fine.
+  const changingIdentity = IDENTITY.some((f) => f in patch && String(patch[f] || '') !== String(before[f] || ''));
+  if (changingIdentity && before.outstanding) {
+    const next = {
+      deviceId: ('loaner_device_id' in patch ? patch.loaner_device_id : before.loaner_device_id) || null,
+      assetTag: ('loaner_asset_tag' in patch ? patch.loaner_asset_tag : before.loaner_asset_tag) || null,
+      serial: ('loaner_serial' in patch ? patch.loaner_serial : before.loaner_serial) || null,
+    };
+    const clash = openLoanForDevice(next);
+    if (clash && clash.id !== id) {
+      throw conflict(
+        `${clash.loaner_asset_tag || clash.loaner_serial} is already out to `
+        + `${clash.borrower_name || clash.borrower_email}. Return that one first.`
+      );
+    }
+  }
+
   const sets = [];
   const params = { id, ts: now() };
   for (const field of EDITABLE) {
@@ -344,7 +377,19 @@ function update(id, patch = {}, { author = null } = {}) {
   if (!sets.length) return before;
   getDb().prepare(`UPDATE loans SET ${sets.join(', ')}, updated_at = @ts WHERE id = @id`).run(params);
   syncTicketColumns(id);
-  return get(id);
+
+  // Leave a trail on the ticket for the changes somebody might query later.
+  const after = get(id);
+  const changes = [];
+  if (changingIdentity) {
+    changes.push(`loaner corrected to ${after.loaner_asset_tag || after.loaner_serial}`);
+  }
+  if (after.borrower_email !== before.borrower_email) changes.push(`loan reassigned to ${after.borrower_email}`);
+  if (after.reason !== before.reason) changes.push(`loan reason changed to ${after.reason_label}`);
+  if (after.due_day !== before.due_day) changes.push(`loaner due date set to ${after.due_day || 'none'}`);
+  for (const line of changes) addTicketEvent(after.ticket_id, line, author);
+
+  return after;
 }
 
 /** Link a loan to a repair after the fact, or unlink it (ticketId = null). */
@@ -427,7 +472,7 @@ async function noteOnLoaner(loan, line) {
 }
 
 module.exports = {
-  REASONS, OWN_DEVICE_STATES, RETURN_CONDITIONS,
+  REASONS, OWN_DEVICE_STATES, RETURN_CONDITIONS, EDITABLE,
   reasonMeta, reasonLabel, decorate,
   get, list, openForEmail, forTicket, openLoanForDevice,
   issue, returnLoan, update, setTicket, remove,

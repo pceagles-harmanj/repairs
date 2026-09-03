@@ -268,3 +268,187 @@ test('old ticket loaners were moved into the loans table by the migration', () =
   require('../src/db').migrateData(db);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM loans WHERE ticket_id = ?').get(ticketId).n, 1);
 });
+
+// ---- fixing a loan that is already out -------------------------------------
+
+test('the details of a loan that is out can all be corrected', async () => {
+  const loan = (await dispatch({ reason: 'not_charged' })).body.loan;
+
+  const res = await srv.call('/api/loans/' + loan.id, {
+    method: 'PATCH',
+    body: {
+      reason: 'left_at_home',
+      borrower_name: 'Samuel Smith',
+      own_asset_tag: 'pc-1042',
+      own_device_state: 'at_home',
+      due_at: '2026-09-30',
+      author: 'Jacob',
+    },
+  });
+  assert.equal(res.status, 200);
+  const after = res.body.loan;
+  assert.equal(after.reason, 'left_at_home');
+  assert.equal(after.borrower_name, 'Samuel Smith');
+  assert.equal(after.own_asset_tag, 'PC-1042');
+  assert.equal(after.own_device_id, 'dev-own-1', 'the tag was looked up, not just stored');
+  assert.equal(after.own_device_state, 'at_home');
+  assert.equal(after.due_day, '2026-09-30');
+  assert.equal(after.outstanding, true, 'still out');
+});
+
+test('a mis-scanned loaner tag can be corrected in place', async () => {
+  const loan = (await dispatch()).body.loan;
+  assert.equal(loan.loaner_asset_tag, 'Loaner-012');
+
+  const res = await srv.call('/api/loans/' + loan.id, {
+    method: 'PATCH', body: { loaner_asset_tag: '13', author: 'Jacob' },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.loan.loaner_asset_tag, 'Loaner-013');
+  assert.equal(res.body.loan.loaner_device_id, 'dev-loaner-13', 'relooked up in Google');
+
+  // The freed machine can go out again, and the corrected one cannot double-book.
+  assert.equal((await dispatch({ loaner_asset_tag: '12', borrower_email: 'ava@example.org' })).status, 201);
+});
+
+test('correcting a tag onto a machine already out is refused', async () => {
+  const mine = (await dispatch()).body.loan;
+  await dispatch({ loaner_asset_tag: '13', borrower_email: 'ava@example.org', borrower_name: 'Ava' });
+
+  const res = await srv.call('/api/loans/' + mine.id, {
+    method: 'PATCH', body: { loaner_asset_tag: '13' },
+  });
+  assert.equal(res.status, 409);
+  assert.match(res.body.error, /already out to Ava/);
+  assert.match(res.body.error, /Return that one first/);
+});
+
+test('a loan cannot be edited into having no contact address', async () => {
+  const loan = (await dispatch()).body.loan;
+  const res = await srv.call('/api/loans/' + loan.id, { method: 'PATCH', body: { borrower_email: '' } });
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /nobody can be reminded/);
+});
+
+test("the student's own device can be cleared, not just changed", async () => {
+  const loan = (await dispatch({ own_asset_tag: 'pc-1042' })).body.loan;
+  assert.equal(loan.own_device_id, 'dev-own-1');
+
+  const res = await srv.call('/api/loans/' + loan.id, { method: 'PATCH', body: { own_asset_tag: '' } });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.loan.own_asset_tag, null);
+  assert.equal(res.body.loan.own_device_id, null, 'the whole device is forgotten, not just the tag');
+  assert.equal(res.body.loan.own_serial, null);
+});
+
+test('edits to a loan on a ticket are written into the ticket history', async () => {
+  const ticket = (await srv.call('/api/tickets', {
+    method: 'POST',
+    body: {
+      serial: '5CD1234ABC', asset_tag: 'PC-1042', model: 'Lenovo 300e',
+      user_email: 'sam@example.org', user_name: 'Sam Smith',
+      issue_description: 'Cracked screen', notify: false,
+    },
+  })).body.ticket;
+  const loan = (await dispatch({ ticket_id: ticket.id })).body.loan;
+
+  await srv.call('/api/loans/' + loan.id, {
+    method: 'PATCH', body: { due_at: '2026-10-01', reason: 'at_vendor', author: 'Jacob' },
+  });
+
+  const events = (await srv.call('/api/tickets/' + ticket.id)).body.ticket.events.map((e) => e.body || '');
+  assert.ok(events.some((b) => /due date set to 2026-10-01/.test(b)), events.join(' | '));
+  assert.ok(events.some((b) => /reason changed to/.test(b)));
+});
+
+// ---- attaching a repair after the fact -------------------------------------
+
+test("the student's own open tickets are offered for attaching", async () => {
+  const loan = (await dispatch()).body.loan;
+
+  const mine = (await srv.call('/api/tickets', {
+    method: 'POST',
+    body: {
+      serial: '5CD1234ABC', asset_tag: 'PC-1042', model: 'Lenovo 300e',
+      user_email: 'sam@example.org', user_name: 'Sam Smith',
+      issue_description: 'Screen went black', notify: false,
+    },
+  })).body.ticket;
+  // Somebody else's ticket must not be offered.
+  const theirs = (await srv.call('/api/tickets', {
+    method: 'POST',
+    body: {
+      serial: 'OTHER', asset_tag: 'PC-2', model: 'Lenovo 300e',
+      user_email: 'ava@example.org', user_name: 'Ava Jones',
+      issue_description: 'Keyboard', notify: false,
+    },
+  })).body.ticket;
+
+  const res = await srv.call(`/api/loans/${loan.id}/ticket-options`);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.attached, null);
+  const ids = res.body.tickets.map((t) => t.id);
+  assert.ok(ids.includes(mine.id), 'their own ticket is there');
+  assert.ok(!ids.includes(theirs.id), "and nobody else's");
+
+  // Attaching then works, and the ticket picks the loaner up.
+  const linked = await srv.call(`/api/loans/${loan.id}/ticket`, { method: 'POST', body: { ticket_id: mine.id } });
+  assert.equal(linked.status, 200);
+  const detail = (await srv.call('/api/tickets/' + mine.id)).body.ticket;
+  assert.equal(detail.loaner_asset_tag, 'Loaner-012');
+  assert.equal(detail.loaner_outstanding, true);
+});
+
+test('two loans cannot be attached to one ticket', async () => {
+  const ticket = (await srv.call('/api/tickets', {
+    method: 'POST',
+    body: {
+      serial: 'S-A', asset_tag: 'PC-3', model: 'Lenovo 300e',
+      user_email: 'sam@example.org', user_name: 'Sam Smith',
+      issue_description: 'Hinge', notify: false,
+    },
+  })).body.ticket;
+
+  const first = (await dispatch({ ticket_id: ticket.id })).body.loan;
+  const second = (await dispatch({
+    loaner_asset_tag: '13', borrower_email: 'ava@example.org', borrower_name: 'Ava', force: true,
+  })).body.loan;
+
+  const res = await srv.call(`/api/loans/${second.id}/ticket`, { method: 'POST', body: { ticket_id: ticket.id } });
+  assert.equal(res.status, 409);
+  assert.match(res.body.error, new RegExp(`already has loan #${first.id}`));
+});
+
+test('a bad ticket number is refused rather than silently ignored', async () => {
+  const loan = (await dispatch()).body.loan;
+  const res = await srv.call(`/api/loans/${loan.id}/ticket`, { method: 'POST', body: { ticket_id: 99999 } });
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /No ticket #99999/);
+});
+
+test('a ticket can adopt a loaner the student already had out', async () => {
+  // Monday: left it at home. Wednesday: the screen is cracked and a ticket is
+  // opened. The loaner already in their hands should be reusable.
+  const loan = (await dispatch({ reason: 'left_at_home' })).body.loan;
+  const ticket = (await srv.call('/api/tickets', {
+    method: 'POST',
+    body: {
+      serial: '5CD1234ABC', asset_tag: 'PC-1042', model: 'Lenovo 300e',
+      user_email: 'sam@example.org', user_name: 'Sam Smith',
+      issue_description: 'Cracked screen', notify: false,
+    },
+  })).body.ticket;
+
+  // This is what the drawer asks for: open loans for this student, unattached.
+  const mine = (await srv.call('/api/loans?email=sam%40example.org')).body.loans.filter((l) => !l.ticket_id);
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0].id, loan.id);
+
+  const before = mine[0].due_day;
+  await srv.call(`/api/loans/${loan.id}/ticket`, { method: 'POST', body: { ticket_id: ticket.id } });
+  const after = (await srv.call('/api/loans/' + loan.id)).body.loan;
+
+  assert.equal(after.ticket_id, ticket.id);
+  assert.equal(after.due_day, before, 'the clock it was already on is kept');
+  assert.equal(after.reason, 'left_at_home', 'and the original reason is not rewritten');
+});

@@ -989,6 +989,7 @@ function renderLoanerPanel(t) {
 function renderLoanerSearch(t, ou) {
   const box = $('#d-loaner-panel');
   box.innerHTML = `
+    <div id="d-loan-adopt"></div>
     <p class="small muted" style="margin-top:0">Scan or type the loaner's asset tag. We look it up in
       <span class="mono">${esc(ou)}</span> in Google Admin, so the loaner is linked the same way as the repaired device.
       It will be due back in ${esc((state.meta.loaner && state.meta.loaner.due_school_days) || 5)} school days,
@@ -999,6 +1000,11 @@ function renderLoanerSearch(t, ou) {
       <button class="btn ghost sm" id="d-loaner-pool" style="flex:0 0 auto">Show pool</button>
     </div>
     <div class="device-hits" id="d-loaner-hits" style="margin-top:10px"></div>`;
+
+  // The student may already be holding a loaner that went out before this ticket
+  // existed - "left it at home" on Monday, cracked screen on Wednesday. Offer to
+  // adopt it rather than making anyone hand out a second machine.
+  offerExistingLoan(t);
 
   const hits = $('#d-loaner-hits');
   const issue = async (device) => {
@@ -1482,7 +1488,9 @@ function renderLoanerTable() {
       <th>${returnedView ? 'Returned' : 'Due'}</th>
       <th>Days out</th><th>Repair</th><th>Reminders</th><th></th>
     </tr></thead><tbody>${rows.map((l) => `<tr data-loan="${l.id}">
-      <td data-label="Loaner"><b>${esc(l.loaner_asset_tag || l.loaner_serial || '?')}</b>
+      <td data-label="Loaner">${returnedView
+        ? `<b>${esc(l.loaner_asset_tag || l.loaner_serial || '?')}</b>`
+        : `<button class="linkish" data-edit-loan="${l.id}" style="font-weight:700">${esc(l.loaner_asset_tag || l.loaner_serial || '?')}</button>`}
         <div class="small muted">${esc(l.loaner_model || '')}</div></td>
       <td data-label="Student">${esc(l.user_name || l.user_email || '-')}
         ${l.user_name && l.user_email ? `<div class="small muted">${esc(l.user_email)}</div>` : ''}</td>
@@ -1501,6 +1509,7 @@ function renderLoanerTable() {
       <td data-label="Reminders" class="small muted">${l.reminder_count ? esc(l.reminders.map((r) => r.kind.replace(/_/g, ' ')).join(', ')) : 'none'}</td>
       <td class="row-actions">
         ${returnedView ? '' : `<button class="btn sm" data-return-loan="${l.id}">Returned</button>
+        <button class="btn ghost sm" data-edit-loan="${l.id}">Edit</button>
         <button class="btn ghost sm" data-extend-loan="${l.id}">+5 days</button>`}
         ${l.ticket_id ? `<button class="btn ghost sm" data-open="${l.ticket_id}">Ticket</button>` : ''}
       </td>
@@ -1508,6 +1517,8 @@ function renderLoanerTable() {
 
   $$('#loaner-table [data-return-loan]').forEach((b) =>
     b.addEventListener('click', () => openReturnForm(rows.find((l) => String(l.id) === b.dataset.returnLoan))));
+  $$('#loaner-table [data-edit-loan]').forEach((b) =>
+    b.addEventListener('click', () => openLoanEditForm(rows.find((l) => String(l.id) === b.dataset.editLoan))));
   $$('#loaner-table [data-extend-loan]').forEach((b) =>
     b.addEventListener('click', async () => {
       b.disabled = true;
@@ -1651,6 +1662,181 @@ function openDispatchForm(prefill = {}) {
       }
       e.target.disabled = false;
     }
+  });
+}
+
+/**
+ * Change a loan that is already out.
+ *
+ * Everything here is a correction someone actually needs: the wrong tag got
+ * scanned, the reason was a guess, the student's device turned out to be broken
+ * after all and now there is a ticket for it. Refusing to edit any of that just
+ * means the deployed-loaners list slowly stops matching reality.
+ */
+async function openLoanEditForm(loan) {
+  if (!loan) return;
+  const reasons = (state.meta.loaner && state.meta.loaner.reasons) || [];
+  const ownStates = (state.meta.loaner && state.meta.loaner.own_device_states) || [];
+  const { close, node } = subOverlay(`<div class="modal">
+    <header><h2>${esc(loan.loaner_asset_tag || loan.loaner_serial || 'Loan')}</h2>
+      <span class="pill" style="background:${loan.overdue ? 'var(--danger)' : 'var(--muted)'}">
+        ${loan.overdue ? `${esc(loan.school_days_overdue)} school days overdue` : `out ${esc(loan.days_out == null ? '?' : loan.days_out)} days`}</span>
+      <div style="flex:1"></div>
+      <button class="btn ghost sm" data-x="ed-cancel">Cancel</button></header>
+    <div class="body">
+      <div class="row">
+        <label class="field" style="flex:1 1 200px"><span>Loaner asset tag</span>
+          <input type="text" id="ed-loaner" value="${esc(loan.loaner_asset_tag || loan.loaner_serial || '')}"></label>
+        <label class="field" style="flex:1 1 160px"><span>Due back</span>
+          <input type="date" id="ed-due" value="${esc(loan.due_day || '')}"></label>
+      </div>
+      <div class="small muted" style="margin:-4px 0 10px">Changing the tag corrects a mis-scan.
+        To hand the student a different machine, mark this one returned and hand out the new one.</div>
+
+      <div class="row">
+        <label class="field" style="flex:1 1 240px"><span>Why do they have it?</span>
+          <select id="ed-reason">${reasons.map((r) => `<option value="${esc(r.value)}"${r.value === loan.reason ? ' selected' : ''}>${esc(r.label)}</option>`).join('')}</select></label>
+        <label class="field" style="flex:2 1 260px"><span id="ed-note-label">Note</span>
+          <input type="text" id="ed-note" value="${esc(loan.reason_note || '')}"></label>
+      </div>
+      <div class="row">
+        <label class="field" style="flex:1 1 220px"><span>Student email</span>
+          <input type="email" id="ed-email" value="${esc(loan.borrower_email || '')}"></label>
+        <label class="field" style="flex:1 1 180px"><span>Student name</span>
+          <input type="text" id="ed-name" value="${esc(loan.borrower_name || '')}"></label>
+      </div>
+
+      <h2 style="font-size:14px;margin:16px 0 6px">Their own device</h2>
+      <div class="row">
+        <label class="field" style="flex:1 1 200px"><span>Asset tag or serial</span>
+          <input type="text" id="ed-own" value="${esc(loan.own_asset_tag || loan.own_serial || '')}" placeholder="leave blank if unknown"></label>
+        <label class="field" style="flex:1 1 200px"><span>Where is it?</span>
+          <select id="ed-own-state">${ownStates.map((o) => `<option value="${esc(o.value)}"${o.value === loan.own_device_state ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}</select></label>
+      </div>
+
+      <h2 style="font-size:14px;margin:16px 0 6px">Repair ticket</h2>
+      <div id="ed-ticket">${loan.ticket_id
+        ? `<p class="small" style="margin:0">Attached to <a href="#" data-ed-open="${loan.ticket_id}">#${esc(loan.ticket_id)}</a>.
+             <button class="linkish" id="ed-detach">Detach it</button></p>`
+        : '<p class="small muted" style="margin:0">Loading this student\'s tickets&hellip;</p>'}</div>
+
+      <div id="ed-result"></div>
+    </div>
+    <footer>
+      <button class="btn ghost sm danger" id="ed-delete">Delete this loan</button>
+      <div style="flex:1"></div>
+      <button class="btn primary" id="ed-save">Save changes</button></footer>
+  </div>`);
+  $('[data-x=ed-cancel]', node).addEventListener('click', close);
+  attachScanner($('#ed-loaner', node), () => {});
+  addScanButton($('#ed-loaner', node), () => {});
+  attachScanner($('#ed-own', node), () => {});
+  addScanButton($('#ed-own', node), () => {});
+
+  const syncNote = () => {
+    const meta = reasons.find((r) => r.value === $('#ed-reason', node).value);
+    const need = Boolean(meta && meta.requires_note);
+    $('#ed-note-label', node).textContent = need ? 'Note (required)' : 'Note';
+  };
+  $('#ed-reason', node).addEventListener('change', syncNote);
+  syncNote();
+
+  const refresh = async () => {
+    close();
+    await loadLoaners(true);
+  };
+
+  const wireDetach = () => {
+    const btn = $('#ed-detach', node);
+    if (btn) {
+      btn.addEventListener('click', async () => {
+        try {
+          await api(`/loans/${loan.id}/ticket`, { method: 'POST', body: { ticket_id: null } });
+          toast('Detached');
+          await refresh();
+        } catch (err) { toast(err.message, true); }
+      });
+    }
+    $$('[data-ed-open]', node).forEach((a) => a.addEventListener('click', (e) => {
+      e.preventDefault();
+      close();
+      openTicket(Number(a.dataset.edOpen));
+    }));
+  };
+  wireDetach();
+
+  // Offer this student's own tickets rather than making anyone hunt for a number.
+  if (!loan.ticket_id) {
+    try {
+      const { tickets: options } = await api(`/loans/${loan.id}/ticket-options`);
+      const box = $('#ed-ticket', node);
+      if (!box) return;
+      box.innerHTML = `
+        ${options.length
+          ? `<div class="small muted" style="margin:0 0 6px">Open tickets for ${esc(loan.borrower_email || 'this student')}:</div>
+             ${options.map((t) => `<button class="btn ghost sm" data-attach="${t.id}" style="margin:0 6px 6px 0">
+               #${esc(t.id)} ${esc(t.asset_tag || '')} <span class="muted">${esc((t.issue_category || t.issue_description || '').slice(0, 40))}</span></button>`).join('')}`
+          : `<p class="small muted" style="margin:0 0 6px">No open tickets for ${esc(loan.borrower_email || 'this student')}.</p>`}
+        <div class="row" style="align-items:flex-end;margin-top:4px">
+          <label class="field" style="flex:0 1 170px;margin-bottom:0"><span>Or a ticket number</span>
+            <input type="number" id="ed-ticket-id" min="1" placeholder="e.g. 128"></label>
+          <button class="btn sm" id="ed-attach" style="flex:0 0 auto">Attach</button>
+        </div>`;
+      const attach = async (ticketId) => {
+        try {
+          await api(`/loans/${loan.id}/ticket`, { method: 'POST', body: { ticket_id: ticketId } });
+          toast(`Attached to #${ticketId}`);
+          await refresh();
+        } catch (err) {
+          $('#ed-result', node).innerHTML = `<div class="result-line err">${esc(err.message)}</div>`;
+        }
+      };
+      $$('[data-attach]', node).forEach((b) => b.addEventListener('click', () => attach(Number(b.dataset.attach))));
+      $('#ed-attach', node).addEventListener('click', () => {
+        const id = Number($('#ed-ticket-id', node).value);
+        if (!id) return toast('Type a ticket number first', true);
+        attach(id);
+      });
+    } catch {
+      const box = $('#ed-ticket', node);
+      if (box) box.innerHTML = '<p class="small muted" style="margin:0">Could not load tickets.</p>';
+    }
+  }
+
+  $('#ed-save', node).addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    try {
+      const body = {
+        loaner_asset_tag: cleanScan($('#ed-loaner', node).value),
+        due_at: $('#ed-due', node).value || null,
+        reason: $('#ed-reason', node).value,
+        reason_note: $('#ed-note', node).value.trim(),
+        borrower_email: $('#ed-email', node).value.trim(),
+        borrower_name: $('#ed-name', node).value.trim(),
+        own_asset_tag: cleanScan($('#ed-own', node).value),
+        own_device_state: $('#ed-own-state', node).value,
+      };
+      await api('/loans/' + loan.id, { method: 'PATCH', body });
+      toast('Saved');
+      await refresh();
+    } catch (err) {
+      $('#ed-result', node).innerHTML = `<div class="result-line err">${esc(err.message)}</div>`;
+      e.target.disabled = false;
+    }
+  });
+
+  $('#ed-delete', node).addEventListener('click', async () => {
+    // Deleting is for a loan that should never have existed. Returning it is
+    // what you want the rest of the time, so say so.
+    if (!window.confirm(
+      `Delete the record of ${loan.loaner_asset_tag || loan.loaner_serial} being out?\n\n`
+      + 'Use this only for a loan entered by mistake. If the machine came back, press Returned instead.'
+    )) return;
+    try {
+      await api('/loans/' + loan.id, { method: 'DELETE' });
+      toast('Loan deleted');
+      await refresh();
+    } catch (err) { toast(err.message, true); }
   });
 }
 
@@ -2425,6 +2611,41 @@ function openItemForm(item = null) {
     attachScanner($('#i-asset'), () => {});
     addScanButton($('#i-asset'), () => {});
   }
+}
+
+/**
+ * Does this ticket's student already have a loaner out with no repair attached?
+ * If so, linking it is almost always what was meant.
+ */
+async function offerExistingLoan(t) {
+  const mount = $('#d-loan-adopt');
+  if (!mount || !t.user_email) return;
+  let open = [];
+  try {
+    const res = await api('/loans?email=' + encodeURIComponent(t.user_email));
+    open = (res.loans || []).filter((l) => !l.ticket_id);
+  } catch { return; }
+  if (!open.length) return;
+
+  mount.innerHTML = `<div class="banner warn" style="margin-top:0">
+    <strong>${esc(t.user_name || t.user_email)} already has a loaner out.</strong>
+    ${open.map((l) => `<div class="row" style="align-items:center;margin-top:8px">
+      <div class="grow small">${esc(l.loaner_asset_tag || l.loaner_serial)}
+        <span class="muted">&middot; ${esc(l.reason_label)} &middot; out ${esc(l.days_out == null ? '?' : l.days_out)} days${l.due_day ? `, due ${esc(l.due_day)}` : ''}</span></div>
+      <button class="btn sm" data-adopt="${l.id}" style="flex:0 0 auto">Use it for this repair</button>
+    </div>`).join('')}
+    <div class="small muted" style="margin-top:6px">Linking it keeps the same due date and reminder history.
+      Only hand out another machine if they genuinely need two.</div></div>`;
+
+  $$('[data-adopt]', mount).forEach((b) =>
+    b.addEventListener('click', (e) =>
+      busyish(e.target, async () => {
+        try {
+          await api(`/loans/${b.dataset.adopt}/ticket`, { method: 'POST', body: { ticket_id: t.id } });
+          toast('Loaner linked to this ticket');
+          await refreshTicket();
+        } catch (err) { toast(err.message, true); }
+      })));
 }
 
 /** Everything about one item: stock, movement, what it went into, what is coming. */
