@@ -14,6 +14,7 @@ const mailer = require('./mailer');
 const google = require('./google');
 const { statusLabel } = require('./lib/statuses');
 const days = require('./lib/schooldays');
+const loans = require('./loans');
 
 const now = () => new Date().toISOString();
 
@@ -25,7 +26,13 @@ const fmtDay = (day) => {
 
 const plural = (n, word) => `${n} ${word}${Math.abs(n) === 1 ? '' : 's'}`;
 
+/**
+ * Ticket history, when there is a ticket. A loaner handed out for a flat battery
+ * has no ticket to write on, and that is fine - the loan row carries its own
+ * dates and the reminder table records what was sent.
+ */
 function addEvent(ticketId, body, author = 'system') {
+  if (!ticketId) return;
   getDb()
     .prepare(`INSERT INTO ticket_events (ticket_id, type, body, author, created_at) VALUES (?, 'field', ?, ?, ?)`)
     .run(ticketId, body, author, now());
@@ -67,82 +74,62 @@ function dueInfo(ticket, today = new Date()) {
 /** The default due day for a loaner handed out now (school days, holidays skipped). */
 const defaultDueDay = (issuedAt = new Date()) => days.defaultDueDay(issuedAt);
 
-function setDue(ticketId, dueDay, { author = null } = {}) {
+/**
+ * Set a due date. The id is a LOAN id: a loaner can be out with no repair, so
+ * the ticket is no longer the thing that owns the date. The ticket columns are
+ * mirrored by loans.update for the drawer and the templates.
+ */
+function setDue(loanId, dueDay, { author = null } = {}) {
   const day = String(dueDay || '').trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
     const err = new Error('A due date must look like 2026-09-10');
     err.statusCode = 400;
     throw err;
   }
-  getDb().prepare('UPDATE tickets SET loaner_due_at = ?, updated_at = ? WHERE id = ?').run(day, now(), ticketId);
-  addEvent(ticketId, `loaner due date set to ${day}`, author);
+  const loan = loans.update(loanId, { due_at: day }, { author });
+  if (!loan) return null;
+  if (loan.ticket_id) addEvent(loan.ticket_id, `loaner due date set to ${day}`, author);
   return day;
 }
 
 /** Push the due date out by N school days from today (or from the due date if later). */
-function extendDue(ticketId, schoolDays, { author = null } = {}) {
-  const ticket = getDb().prepare('SELECT * FROM tickets WHERE id = ?').get(ticketId);
-  if (!ticket) return null;
-  const base = ticket.loaner_due_at && ticket.loaner_due_at > days.toDayString(new Date())
-    ? days.fromDayString(ticket.loaner_due_at)
+function extendDue(loanId, schoolDays, { author = null } = {}) {
+  const loan = loans.get(loanId);
+  if (!loan) return null;
+  const base = loan.due_day && loan.due_day > days.toDayString(new Date())
+    ? days.fromDayString(loan.due_day)
     : new Date();
   const day = days.toDayString(days.addSchoolDays(base, schoolDays));
-  getDb().prepare('UPDATE tickets SET loaner_due_at = ?, updated_at = ? WHERE id = ?').run(day, now(), ticketId);
-  addEvent(ticketId, `loaner due date extended by ${plural(schoolDays, 'school day')} to ${day}`, author);
+  loans.update(loanId, { due_at: day }, { author });
+  if (loan.ticket_id) {
+    addEvent(loan.ticket_id, `loaner due date extended by ${plural(schoolDays, 'school day')} to ${day}`, author);
+  }
   return day;
 }
 
 // --- the deployed-loaners view ----------------------------------------------
-
-const OUTSTANDING_SQL = `
-  SELECT * FROM tickets
-   WHERE (loaner_device_id IS NOT NULL OR loaner_asset_tag IS NOT NULL OR loaner_serial IS NOT NULL)
-     AND loaner_returned_at IS NULL`;
-
-function decorate(row, today = new Date()) {
-  const info = dueInfo(row, today);
-  const reminders = getDb()
-    .prepare('SELECT kind, sent_on FROM loaner_reminders WHERE ticket_id = ? ORDER BY id')
-    .all(row.id);
-  return {
-    ticket_id: row.id,
-    status: row.status,
-    status_label: statusLabel(row.status),
-    user_email: row.user_email,
-    user_name: row.user_name,
-    assigned_to: row.assigned_to,
-    loaner_asset_tag: row.loaner_asset_tag,
-    loaner_serial: row.loaner_serial,
-    loaner_model: row.loaner_model,
-    loaner_device_id: row.loaner_device_id,
-    loaner_issued_at: row.loaner_issued_at,
-    loaner_returned_at: row.loaner_returned_at,
-    device_asset_tag: row.asset_tag,
-    device_model: row.model,
-    ...info,
-    reminders,
-    reminder_count: reminders.length,
-  };
-}
+//
+// These used to query the tickets table directly. A loan no longer needs a
+// ticket, so the loans table is the source and `decorate` lives in loans.js;
+// the shape it returns is unchanged so the digest, the reminder templates and
+// the table in the UI all keep working.
 
 /** Everything currently out, soonest due first, undated last. */
 function listOutstanding({ today = new Date() } = {}) {
-  const rows = getDb().prepare(`${OUTSTANDING_SQL} ORDER BY COALESCE(loaner_due_at, '9999-99-99'), id`).all();
-  return rows.map((r) => decorate(r, today));
+  return loans.list({ open: true, today });
 }
 
 /** Recently returned, for the "handed back" tab. */
 function listReturned({ limit = 50, today = new Date() } = {}) {
-  const rows = getDb()
-    .prepare(`SELECT * FROM tickets WHERE loaner_returned_at IS NOT NULL ORDER BY loaner_returned_at DESC LIMIT ?`)
-    .all(limit);
-  return rows.map((r) => decorate(r, today));
+  return loans.list({ open: false, limit, today });
 }
 
 function stats(today = new Date()) {
   const out = listOutstanding({ today });
   const overdue = out.filter((l) => l.overdue);
   const daysOut = out.map((l) => l.days_out).filter((n) => typeof n === 'number');
+  const byReason = {};
+  for (const l of out) byReason[l.reason] = (byReason[l.reason] || 0) + 1;
   return {
     out: out.length,
     due_today: out.filter((l) => l.due_today).length,
@@ -153,6 +140,9 @@ function stats(today = new Date()) {
     avg_days_out: daysOut.length ? Math.round((daysOut.reduce((a, b) => a + b, 0) / daysOut.length) * 10) / 10 : 0,
     // repair finished but the loaner is still out - the ones to chase first
     still_out_after_repair: out.filter((l) => l.repair_done_at && l.days_since_repair_done >= 1).length,
+    // loaners out for something other than a repair, which is new
+    without_ticket: out.filter((l) => !l.ticket_id).length,
+    by_reason: byReason,
   };
 }
 
@@ -164,30 +154,39 @@ const REMINDER_TEMPLATE = {
   overdue: 'loaner_overdue',
 };
 
-function alreadySent(ticketId, kind, day) {
+function alreadySent(loanId, kind, day) {
   return Boolean(
-    getDb().prepare('SELECT 1 FROM loaner_reminders WHERE ticket_id = ? AND kind = ? AND sent_on = ?').get(ticketId, kind, day)
+    getDb().prepare('SELECT 1 FROM loan_reminders WHERE loan_id = ? AND kind = ? AND sent_on = ?').get(loanId, kind, day)
   );
 }
 
-function countSent(ticketId, kind) {
-  return getDb().prepare('SELECT COUNT(*) AS n FROM loaner_reminders WHERE ticket_id = ? AND kind = ?').get(ticketId, kind).n;
+function countSent(loanId, kind) {
+  return getDb().prepare('SELECT COUNT(*) AS n FROM loan_reminders WHERE loan_id = ? AND kind = ?').get(loanId, kind).n;
 }
 
-function lastSentDay(ticketId, kind) {
+function lastSentDay(loanId, kind) {
   const row = getDb()
-    .prepare('SELECT sent_on FROM loaner_reminders WHERE ticket_id = ? AND kind = ? ORDER BY sent_on DESC LIMIT 1')
-    .get(ticketId, kind);
+    .prepare('SELECT sent_on FROM loan_reminders WHERE loan_id = ? AND kind = ? ORDER BY sent_on DESC LIMIT 1')
+    .get(loanId, kind);
   return row ? row.sent_on : null;
 }
 
-function recordSent(ticketId, kind, day, dueOn, toEmail) {
+function recordSent(loan, kind, day, dueOn, toEmail) {
   getDb()
     .prepare(
-      `INSERT OR IGNORE INTO loaner_reminders (ticket_id, kind, sent_on, due_on, to_email, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT OR IGNORE INTO loan_reminders (loan_id, ticket_id, kind, sent_on, due_on, to_email, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(ticketId, kind, day, dueOn || null, toEmail || null, now());
+    .run(loan.id, loan.ticket_id || null, kind, day, dueOn || null, toEmail || null, now());
+  // Keep the ticket-keyed table fed too, for anything still reading it.
+  if (loan.ticket_id) {
+    getDb()
+      .prepare(
+        `INSERT OR IGNORE INTO loaner_reminders (ticket_id, loan_id, kind, sent_on, due_on, to_email, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(loan.ticket_id, loan.id, kind, day, dueOn || null, toEmail || null, now());
+  }
 }
 
 /** Which reminder (if any) this loaner has earned today. */
@@ -197,23 +196,61 @@ function reminderDue(loaner, today = new Date()) {
 
   if (loaner.overdue) {
     if (config.loanerDue.maxOverdueNudges <= 0) return null;
-    if (countSent(loaner.ticket_id, 'overdue') >= config.loanerDue.maxOverdueNudges) return null;
-    const last = lastSentDay(loaner.ticket_id, 'overdue');
+    if (countSent(loaner.id, 'overdue') >= config.loanerDue.maxOverdueNudges) return null;
+    const last = lastSentDay(loaner.id, 'overdue');
     if (last && days.calendarDaysBetween(last, day) < config.loanerDue.overdueEveryDays) return null;
     // Do not nudge on the very first day past due if the due-day mail went today.
-    if (!last && alreadySent(loaner.ticket_id, 'due_today', day)) return null;
+    if (!last && alreadySent(loaner.id, 'due_today', day)) return null;
     return 'overdue';
   }
-  if (loaner.due_today && !alreadySent(loaner.ticket_id, 'due_today', day)) return 'due_today';
-  if (loaner.due_tomorrow && !alreadySent(loaner.ticket_id, 'due_tomorrow', day)) return 'due_tomorrow';
+  if (loaner.due_today && !alreadySent(loaner.id, 'due_today', day)) return 'due_today';
+  if (loaner.due_tomorrow && !alreadySent(loaner.id, 'due_tomorrow', day)) return 'due_tomorrow';
   return null;
+}
+
+/**
+ * The mailer renders from a ticket. A ticketless loan has no ticket, so give it
+ * something ticket-shaped: the same field names, an id of null, and the loaner
+ * details the templates already reference. This keeps every existing template
+ * working for both kinds of loan instead of forking the mail path.
+ */
+function subjectFor(loaner) {
+  if (loaner.ticket_id) {
+    const ticket = getDb().prepare('SELECT * FROM tickets WHERE id = ?').get(loaner.ticket_id);
+    if (ticket) return ticket;
+  }
+  return {
+    id: null,
+    loan_id: loaner.id,
+    status: 'received',
+    user_email: loaner.user_email,
+    user_name: loaner.user_name,
+    asset_tag: loaner.own_asset_tag,
+    serial: loaner.own_serial,
+    model: loaner.own_model,
+    device_id: loaner.own_device_id,
+    issue_category: loaner.reason_label,
+    issue_description: loaner.reason_note || loaner.reason_label,
+    loaner_asset_tag: loaner.loaner_asset_tag,
+    loaner_serial: loaner.loaner_serial,
+    loaner_model: loaner.loaner_model,
+    loaner_due_at: loaner.due_day,
+    loaner_issued_at: loaner.issued_at,
+    loaner_returned_at: loaner.returned_at,
+    notify_statuses: null,
+    created_at: loaner.issued_at,
+  };
 }
 
 /** Extra placeholders the reminder templates use. */
 function reminderVars(loaner) {
-  const statusLine = loaner.repair_done_at
+  // Without a ticket there is no repair to talk about, so say something true
+  // instead: the loaner is simply due back.
+  const statusLine = !loaner.ticket_id
+    ? 'This loaner is due back at the technology office - your own device is not with us.'
+    : loaner.repair_done_at
     ? 'Your own device is finished and back with you, so all we need now is the loaner.'
-    : loaner.status === 'ready_for_pickup'
+    : loaner.ticket_status === 'ready_for_pickup'
     ? 'Your device is repaired and waiting at the technology office - bring the loaner when you collect it.'
     : 'Your device is still with us; if you need the loaner longer than this, just say so.';
   const overduePhrase = loaner.school_days_overdue > 0
@@ -246,21 +283,21 @@ async function runReminders({ today = new Date(), reason = 'manual' } = {}) {
     const templateKey = REMINDER_TEMPLATE[kind];
     const tpl = mailer.getTemplate(templateKey);
     if (!tpl || !tpl.auto_send) {
-      result.skipped.push({ ticket_id: loaner.ticket_id, kind, reason: tpl ? 'template_off' : 'no_template' });
+        result.skipped.push({ loan_id: loaner.id, ticket_id: loaner.ticket_id, kind, reason: tpl ? 'template_off' : 'no_template' });
       continue;
     }
 
-    const ticket = getDb().prepare('SELECT * FROM tickets WHERE id = ?').get(loaner.ticket_id);
-    const res = await mailer.sendStatusEmail(ticket, templateKey, { vars: reminderVars(loaner) });
+    const subject = subjectFor(loaner);
+    const res = await mailer.sendStatusEmail(subject, templateKey, { vars: reminderVars(loaner) });
     if (res.result === 'sent' || res.result === 'dry_run') {
-      recordSent(loaner.ticket_id, kind, day, loaner.due_day, loaner.user_email);
+      recordSent(loaner, kind, day, loaner.due_day, loaner.user_email);
       addEvent(loaner.ticket_id, `loaner reminder sent (${kind}) to ${loaner.user_email}`);
-      result.sent.push({ ticket_id: loaner.ticket_id, kind, to: res.to, result: res.result });
+      result.sent.push({ loan_id: loaner.id, ticket_id: loaner.ticket_id, kind, to: res.to, result: res.result });
     } else if (res.result === 'error') {
       addEvent(loaner.ticket_id, `loaner reminder (${kind}) FAILED: ${res.error}`);
-      result.failed.push({ ticket_id: loaner.ticket_id, kind, error: res.error });
+      result.failed.push({ loan_id: loaner.id, ticket_id: loaner.ticket_id, kind, error: res.error });
     } else {
-      result.skipped.push({ ticket_id: loaner.ticket_id, kind, reason: res.reason || res.result });
+      result.skipped.push({ loan_id: loaner.id, ticket_id: loaner.ticket_id, kind, reason: res.reason || res.result });
     }
   }
 

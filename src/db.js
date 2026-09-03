@@ -275,6 +275,49 @@ function migrate(handle) {
       UNIQUE (shipment_id, ticket_id, kind)
     );
 
+    -- A loaner that is out, whether or not a repair is involved.
+    --
+    -- This is the record of "who has school property right now". A repair is one
+    -- reason among several, so ticket_id is nullable and reason is not: a loaner
+    -- handed out with no explanation is how a fleet goes missing.
+    CREATE TABLE IF NOT EXISTS loans (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      -- the loaner itself
+      loaner_device_id  TEXT,
+      loaner_asset_tag  TEXT,
+      loaner_serial     TEXT,
+      loaner_model      TEXT,
+      -- who has it
+      borrower_email    TEXT,
+      borrower_name     TEXT,
+      -- why (required)
+      reason            TEXT NOT NULL,
+      reason_note       TEXT,
+      -- the student's own machine, when we know it
+      own_device_id     TEXT,
+      own_asset_tag     TEXT,
+      own_serial        TEXT,
+      own_model         TEXT,
+      own_device_state  TEXT,           -- with_student | in_shop | at_home | lost | unknown
+      -- the repair, if there is one
+      ticket_id         INTEGER REFERENCES tickets(id) ON DELETE SET NULL,
+      -- the clock
+      issued_at         TEXT NOT NULL,
+      issued_by         TEXT,
+      due_at            TEXT,           -- YYYY-MM-DD, local days
+      returned_at       TEXT,
+      returned_by       TEXT,
+      return_condition  TEXT,           -- ok | damaged | not_returned
+      return_note       TEXT,
+      created_at        TEXT NOT NULL,
+      updated_at        TEXT NOT NULL
+    );
+    -- The hot query is "what is still out", so keep that index narrow.
+    CREATE INDEX IF NOT EXISTS idx_loans_open ON loans(returned_at, due_at);
+    CREATE INDEX IF NOT EXISTS idx_loans_borrower ON loans(borrower_email, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_loans_ticket ON loans(ticket_id);
+    CREATE INDEX IF NOT EXISTS idx_loans_device ON loans(loaner_device_id, returned_at);
+
     -- One row per reminder actually sent, so a restart or a second pass in the
     -- same day cannot double-email a student.
     CREATE TABLE IF NOT EXISTS loaner_reminders (
@@ -288,6 +331,22 @@ function migrate(handle) {
       UNIQUE (ticket_id, kind, sent_on)
     );
     CREATE INDEX IF NOT EXISTS idx_loaner_reminders_ticket ON loaner_reminders(ticket_id, id DESC);
+
+    -- The same idea, keyed on the loan instead of the ticket. The old table
+    -- could not hold a reminder for a loaner that has no repair: its ticket_id
+    -- is NOT NULL with a foreign key, so there was nothing valid to put there.
+    CREATE TABLE IF NOT EXISTS loan_reminders (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      loan_id    INTEGER NOT NULL REFERENCES loans(id) ON DELETE CASCADE,
+      ticket_id  INTEGER REFERENCES tickets(id) ON DELETE SET NULL,
+      kind       TEXT NOT NULL,     -- due_tomorrow | due_today | overdue
+      sent_on    TEXT NOT NULL,     -- YYYY-MM-DD
+      due_on     TEXT,
+      to_email   TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE (loan_id, kind, sent_on)
+    );
+    CREATE INDEX IF NOT EXISTS idx_loan_reminders_loan ON loan_reminders(loan_id, id DESC);
 
     -- Nightly backup results, so Settings can show whether last night worked.
     CREATE TABLE IF NOT EXISTS backups (
@@ -342,6 +401,82 @@ function migrateData(handle) {
     console.log(`  moved ${orphaned.length} fitted part(s) into the ticket parts list`);
   }
 
+  // Loaners used to live as five columns on a ticket, which made a loaner
+  // without a repair impossible to express. Each of those becomes a row in
+  // `loans` with reason 'repair', and the reminders already sent move with it so
+  // nobody gets emailed twice about the same overdue Chromebook.
+  const loanTables = handle
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'loans'")
+    .get();
+  if (loanTables) {
+    const already = handle.prepare('SELECT COUNT(*) AS n FROM loans').get().n;
+    const legacy = handle
+      .prepare(
+        `SELECT * FROM tickets
+          WHERE (loaner_device_id IS NOT NULL OR loaner_asset_tag IS NOT NULL OR loaner_serial IS NOT NULL)
+            AND id NOT IN (SELECT COALESCE(ticket_id, -1) FROM loans)`
+      )
+      .all();
+    if (legacy.length) {
+      const insert = handle.prepare(
+        `INSERT INTO loans (loaner_device_id, loaner_asset_tag, loaner_serial, loaner_model,
+           borrower_email, borrower_name, reason, own_device_id, own_asset_tag, own_serial, own_model,
+           own_device_state, ticket_id, issued_at, issued_by, due_at, returned_at,
+           created_at, updated_at)
+         VALUES (@loaner_device_id, @loaner_asset_tag, @loaner_serial, @loaner_model,
+           @borrower_email, @borrower_name, 'repair', @own_device_id, @own_asset_tag, @own_serial, @own_model,
+           'in_shop', @ticket_id, @issued_at, @issued_by, @due_at, @returned_at,
+           @created_at, @updated_at)`
+      );
+      const relink = handle.prepare('UPDATE loaner_reminders SET loan_id = ? WHERE ticket_id = ? AND loan_id IS NULL');
+      const run = handle.transaction(() => {
+        for (const t of legacy) {
+          const info = insert.run({
+            loaner_device_id: t.loaner_device_id || null,
+            loaner_asset_tag: t.loaner_asset_tag || null,
+            loaner_serial: t.loaner_serial || null,
+            loaner_model: t.loaner_model || null,
+            borrower_email: t.user_email || null,
+            borrower_name: t.user_name || null,
+            // The repair unit IS the student's own device on a repair loan.
+            own_device_id: t.device_id || null,
+            own_asset_tag: t.asset_tag || null,
+            own_serial: t.serial || null,
+            own_model: t.model || null,
+            ticket_id: t.id,
+            issued_at: t.loaner_issued_at || t.created_at,
+            issued_by: t.assigned_to || null,
+            due_at: t.loaner_due_at || null,
+            returned_at: t.loaner_returned_at || null,
+            created_at: t.loaner_issued_at || t.created_at,
+            updated_at: new Date().toISOString(),
+          });
+          relink.run(Number(info.lastInsertRowid), t.id);
+        }
+      });
+      run();
+      if (!already) console.log(`  moved ${legacy.length} ticket loaner(s) into the loans table`);
+    }
+  }
+
+  // Reminder history follows the loan. Copied rather than moved: the old table
+  // stays as it is, so a rollback loses nothing.
+  const hasLoanReminders = handle
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'loan_reminders'")
+    .get();
+  if (hasLoanReminders) {
+    const moved = handle
+      .prepare(
+        `INSERT OR IGNORE INTO loan_reminders (loan_id, ticket_id, kind, sent_on, due_on, to_email, created_at)
+         SELECT r.loan_id, r.ticket_id, r.kind, r.sent_on, r.due_on, r.to_email, r.created_at
+           FROM loaner_reminders r
+           JOIN loans l ON l.id = r.loan_id
+          WHERE r.loan_id IS NOT NULL`
+      )
+      .run();
+    if (moved.changes) console.log(`  carried ${moved.changes} loaner reminder(s) over to the loan`);
+  }
+
   // `new` -> `received`. The label was meaningless to students, and the key
   // followed the label. Tickets, their history, the template and every ticket's
   // notification list all carry the status, so all four move together.
@@ -373,6 +508,10 @@ function migrateData(handle) {
 }
 
 function migrateColumns(handle) {
+  // Reminders used to hang off the ticket. They hang off the loan now, because
+  // a loan does not need a ticket.
+  addColumn(handle, 'loaner_reminders', 'loan_id', 'INTEGER');
+
   // Which model a donor carcass is, so its salvageable parts can be offered.
   addColumn(handle, 'inventory_items', 'model_id', 'INTEGER');
   // Provenance and money on a stock movement.
@@ -467,4 +606,6 @@ function getJsonSetting(key) {
 module.exports = {
   open, getDb, getSetting, setSetting, deleteSetting, getJsonSetting, addColumn,
   resetTemplates, DEFAULT_TEMPLATES,
+  // exported so the migration can be exercised directly in tests
+  migrateData, migrateColumns,
 };

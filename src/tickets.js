@@ -47,6 +47,7 @@ function detail(id) {
     ...ticket,
     loaner_outstanding: Boolean(ticket.loaner_device_id || ticket.loaner_serial) && !ticket.loaner_returned_at,
     loaner_due: require('./loaners').dueInfo(ticket),
+    loan: require('./loans').forTicket(ticket.id),
     parts_used: require('./inventory').partsForTicket(ticket.id),
     parts_fitted: require('./inventory').ticketParts(ticket.id),
     parts_cost: require('./inventory').ticketPartsCost(ticket.id),
@@ -276,41 +277,48 @@ async function addNote(id, { body, author = null, notify = false } = {}) {
 
 // --- loaners -----------------------------------------------------------------
 
-/** Link a Google device as this ticket's loaner and stamp the checkout time. */
+/**
+ * Link a Google device as this ticket's loaner.
+ *
+ * The loan itself is a row in `loans` now (a loaner can be out with no repair at
+ * all), so this creates that row with reason 'repair' and lets loans.js mirror
+ * the details back onto the ticket for the drawer and the email templates.
+ */
 function issueLoaner(id, device, options = {}) {
   const { author = null } = options;
   const ticket = get(id);
   if (!ticket) return null;
   if (!device || !(device.device_id || device.asset_tag || device.serial)) throw badRequest('A loaner device is required');
 
-  const ts = now();
-  // Due back after the configured number of school days, weekends and holidays
-  // skipped, unless the caller set a date explicitly.
-  const dueDay = options.due_day || schoolDays.defaultDueDay(new Date(ts));
+  const loans = require('./loans');
+  // Re-issuing on a ticket that already has one out closes the old loan first,
+  // otherwise the deployed list would show two loaners for one repair.
+  const existing = loans.forTicket(id);
+  if (existing && existing.outstanding) {
+    loans.returnLoan(existing.id, { author, condition: 'ok', note: 'replaced by another loaner' });
+  }
 
-  getDb()
-    .prepare(
-      `UPDATE tickets SET loaner_device_id = @device_id, loaner_asset_tag = @asset_tag,
-         loaner_serial = @serial, loaner_model = @model, loaner_issued_at = @now,
-         loaner_returned_at = NULL, loaner_due_at = @due, updated_at = @now WHERE id = @id`
-    )
-    .run({
-      id,
-      device_id: device.device_id || null,
-      asset_tag: device.asset_tag || null,
-      serial: device.serial || null,
-      model: device.model || null,
-      due: dueDay,
-      now: ts,
-    });
-
-  // A fresh loan starts a fresh reminder history.
-  getDb().prepare('DELETE FROM loaner_reminders WHERE ticket_id = ?').run(id);
+  const loan = loans.issue({
+    loaner_device_id: device.device_id || null,
+    loaner_asset_tag: device.asset_tag || null,
+    loaner_serial: device.serial || null,
+    loaner_model: device.model || null,
+    borrower_email: ticket.user_email,
+    borrower_name: ticket.user_name,
+    reason: 'repair',
+    own_device_id: ticket.device_id || null,
+    own_asset_tag: ticket.asset_tag || null,
+    own_serial: ticket.serial || null,
+    own_model: ticket.model || null,
+    own_device_state: 'in_shop',
+    ticket_id: id,
+    due_at: options.due_day || undefined,
+  }, { author, force: true });
 
   const label = device.asset_tag || device.serial || device.device_id;
   addEvent(id, {
     type: 'field',
-    body: `loaner issued: ${label}${device.model ? ` (${device.model})` : ''}, due back ${dueDay}`,
+    body: `loaner issued: ${label}${device.model ? ` (${device.model})` : ''}, due back ${loan.due_day}`,
     author,
   });
   return get(id);
@@ -320,10 +328,18 @@ function issueLoaner(id, device, options = {}) {
 function returnLoaner(id, { author = null } = {}) {
   const ticket = get(id);
   if (!ticket) return null;
-  if (!ticket.loaner_device_id && !ticket.loaner_serial) throw badRequest('No loaner is issued on this ticket');
-  if (ticket.loaner_returned_at) return ticket;
+  const loans = require('./loans');
+  const loan = loans.forTicket(id);
+  if (!loan || !loan.outstanding) {
+    if (!ticket.loaner_device_id && !ticket.loaner_serial) throw badRequest('No loaner is issued on this ticket');
+    if (ticket.loaner_returned_at) return ticket;
+  }
   const ts = now();
-  getDb().prepare('UPDATE tickets SET loaner_returned_at = ?, updated_at = ? WHERE id = ?').run(ts, ts, id);
+  if (loan && loan.outstanding) {
+    loans.returnLoan(loan.id, { author, at: ts });
+  } else {
+    getDb().prepare('UPDATE tickets SET loaner_returned_at = ?, updated_at = ? WHERE id = ?').run(ts, ts, id);
+  }
   const outFor = ticket.loaner_issued_at
     ? ` after ${schoolDays.calendarDaysBetween(schoolDays.toDayString(new Date(ticket.loaner_issued_at)), schoolDays.toDayString(new Date(ts)))} days`
     : '';

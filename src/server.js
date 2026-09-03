@@ -137,16 +137,95 @@ function listen(app, { port, host, tls, label, url }) {
   return server;
 }
 
+/**
+ * A plain-http listener whose only answer is "go to https instead".
+ *
+ * This exists for the links already sitting in people's inboxes: every magic
+ * link emailed before the certificate went in starts with http://, and without
+ * this they would simply fail to connect the day the app switches to https.
+ *
+ * The Host header is NOT reflected into Location. Whatever a client claims,
+ * the redirect goes to the hostname configured for this site - reflecting it
+ * would turn this listener into an open redirect, and a magic-link URL is
+ * exactly the kind of thing you do not want bounced to somebody else's host.
+ */
+function redirectToHttps({ port, host, target, label }) {
+  let base;
+  try {
+    base = new URL(target);
+  } catch {
+    console.log(`! ${label}: cannot start the http redirect without a valid site URL (${target || 'unset'})`);
+    return null;
+  }
+  const server = http.createServer((req, res) => {
+    let location;
+    try {
+      // Only the path and query come from the request; origin is ours.
+      const to = new URL(req.url || '/', base.origin);
+      location = to.pathname + to.search;
+    } catch {
+      location = '/';
+    }
+    // 302, not 301: a permanent redirect is cached by browsers effectively
+    // forever, which would be painful if the certificate ever has to come out.
+    res.writeHead(302, {
+      Location: base.origin + location,
+      'Cache-Control': 'no-store',
+      'Content-Type': 'text/plain; charset=utf-8',
+    });
+    res.end(`This site has moved to ${base.origin}\n`);
+  });
+  server.on('error', (err) => {
+    console.error(`! ${label} http redirect could not bind port ${port}: ${err.message}`);
+  });
+  server.listen(port, host, () => {
+    console.log(`${label} http redirect listening on http://${host}:${port} -> ${base.origin}`);
+  });
+  return server;
+}
+
+/** Should this site run a redirect listener, and is the port sane? */
+function redirectPortFor(tls, sitePort) {
+  const from = tls && tls.redirectFromPort;
+  if (!from) return 0;
+  if (!(tls.certPath && tls.keyPath)) {
+    console.log(`! a redirect port is set but no certificate is configured, so http would redirect to itself - ignoring port ${from}`);
+    return 0;
+  }
+  if (from === sitePort) {
+    console.log(`! the http redirect port (${from}) is the port the site itself uses - ignoring it`);
+    return 0;
+  }
+  return from;
+}
+
 function start() {
   const servers = [listen(createApp(), {
     port: config.port, host: config.host, tls: config.tls, label: 'Repair tickets', url: config.publicUrl,
   })];
+
+  const techRedirect = redirectPortFor(config.tls, config.port);
+  if (techRedirect) {
+    const server = redirectToHttps({
+      port: techRedirect, host: config.host, target: config.publicUrl, label: 'Repair tickets',
+    });
+    if (server) servers.push(server);
+  }
 
   if (config.publicSite.enabled) {
     servers.push(listen(createPublicApp(), {
       port: config.publicSite.port, host: config.publicSite.host, tls: config.publicSite.tls,
       label: 'Public status site', url: config.publicSite.url,
     }));
+
+    const siteRedirect = redirectPortFor(config.publicSite.tls, config.publicSite.port);
+    if (siteRedirect) {
+      const server = redirectToHttps({
+        port: siteRedirect, host: config.publicSite.host,
+        target: config.publicSite.url, label: 'Public status site',
+      });
+      if (server) servers.push(server);
+    }
   }
 
   backup.startScheduler();
@@ -170,4 +249,4 @@ function start() {
 
 if (require.main === module) start();
 
-module.exports = { createApp, start, listen };
+module.exports = { createApp, start, listen, redirectToHttps, redirectPortFor };

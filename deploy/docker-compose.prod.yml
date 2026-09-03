@@ -5,11 +5,20 @@
 # Two ports, on purpose:
 #   8080  the tech app  - LAN only, never forward this
 #   8081  the student status site - the only thing worth exposing later
+#
+# With TLS on (see deploy/tls-letsencrypt.sh) the host maps 443 -> 8081 and
+# 8443 -> 8080, and the two plain-http ports below answer only with a redirect
+# so that magic links already sitting in inboxes keep working.
 services:
   repairs:
     build:
       context: ..
       dockerfile: Dockerfile
+      args:
+        # Pass these through so the footer can name the build:
+        #   GIT_COMMIT=$(git rev-parse HEAD) docker compose ... build
+        GIT_COMMIT: ${GIT_COMMIT:-}
+        BUILD_DATE: ${BUILD_DATE:-}
     image: repairs:local
     container_name: repairs
     restart: unless-stopped
@@ -20,12 +29,18 @@ services:
     ports:
       - "8080:8080"
       - "8081:8081"
+      # Uncomment together with the TLS_* settings in .env:
+      # - "8443:8443"     # tech UI over https
+      # - "443:8443"      # or expose it on the normal port
+      # - "80:8081"       # http -> https redirect for old emailed links
     volumes:
       # the database and its WAL live here - back this up (it is also what the
       # nightly job copies to the NAS)
       - ./data:/app/data
       # the NAS share, mounted on the host at /mnt/nas-repairs (see runbook)
       - /mnt/nas-repairs:/backups
+      # certificates written by acme.sh on the host, read-only to the app
+      - /etc/repairs-tls:/etc/repairs-tls:ro
     environment:
       - NODE_ENV=production
       - TZ=America/Chicago

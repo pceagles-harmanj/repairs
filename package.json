@@ -1,6 +1,6 @@
 {
   "name": "repair-tickets",
-  "version": "1.0.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Chromebook/device repair ticket management with Google Workspace lookups and status emails",
   "main": "src/server.js",
@@ -11,7 +11,10 @@
     "seed:demo": "node scripts/seed-demo.js",
     "backup": "node scripts/backup.js",
     "check-oauth": "node scripts/check-oauth.js",
-    "track": "node -e \"require('./src/tracking').poll({force:true,respectHours:false}).then(r=>console.log(JSON.stringify(r,null,1)))\""
+    "track": "node -e \"require('./src/tracking').poll({force:true,respectHours:false}).then(r=>console.log(JSON.stringify(r,null,1)))\"",
+    "version:show": "node -e \"console.log(require('./src/config').build)\"",
+    "docker:build": "GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo unknown) BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) docker compose -f deploy/docker-compose.prod.yml build",
+    "docker:up": "npm run docker:build && docker compose -f deploy/docker-compose.prod.yml up -d"
   },
   "engines": {
     "node": ">=20.0.0"

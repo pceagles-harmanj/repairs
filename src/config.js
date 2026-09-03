@@ -92,7 +92,25 @@ function redirectUriProblems() {
   return problems;
 }
 
+/**
+ * What is running. The version comes from package.json; the commit and build
+ * date are injected at image build time (see Dockerfile), so a deployed
+ * container can say exactly what it is without guessing.
+ */
+function buildInfo() {
+  let version = '0.0.0';
+  try { version = require('../package.json').version || version; } catch { /* keep the default */ }
+  return {
+    version,
+    commit: (process.env.GIT_COMMIT || '').slice(0, 7) || null,
+    built_at: process.env.BUILD_DATE || null,
+    node: process.version,
+    env: process.env.NODE_ENV || 'development',
+  };
+}
+
 module.exports = {
+  build: buildInfo(),
   port: Number(process.env.PORT || 8080),
   callbackPath: CALLBACK_PATH,
   redirectUriProblems,
@@ -107,6 +125,9 @@ module.exports = {
   tls: {
     certPath: process.env.TLS_CERT_PATH || '',
     keyPath: process.env.TLS_KEY_PATH || '',
+    // Optional plain-http port that answers only with a redirect to https.
+    // Its job is the links already sitting in people's inboxes.
+    redirectFromPort: intInRange(process.env.TLS_REDIRECT_HTTP_PORT, 0, 0, 65535),
   },
 
   google: {
@@ -156,6 +177,9 @@ module.exports = {
     tls: {
       certPath: process.env.PUBLIC_TLS_CERT_PATH || process.env.TLS_CERT_PATH || '',
       keyPath: process.env.PUBLIC_TLS_KEY_PATH || process.env.TLS_KEY_PATH || '',
+      // The student site is the one that matters here: every magic link ever
+      // emailed points at it, and those links are http until this is set.
+      redirectFromPort: intInRange(process.env.PUBLIC_TLS_REDIRECT_HTTP_PORT, 0, 0, 65535),
     },
   },
 
@@ -202,8 +226,40 @@ module.exports = {
 
   // ---- automatic carrier tracking ----
   tracking: {
-    // aftership | mock | none. Blank/none = statuses stay manual.
-    provider: (process.env.TRACKING_PROVIDER || (process.env.TRACKING_API_KEY ? 'aftership' : 'none')).toLowerCase(),
+    // multi | ups | fedex | usps | aftership | mock | none.
+    // Blank/none = statuses stay manual.
+    //
+    // `multi` is the one to use: it reads the tracking number, works out which
+    // carrier it belongs to, and calls that carrier's own API. UPS, FedEx and
+    // USPS all give those away free, so an aggregator is only worth paying for
+    // if parcels arrive on carriers none of them cover. Amazon Logistics (TBA
+    // numbers) has no public API at all and stays manual.
+    provider: (
+      process.env.TRACKING_PROVIDER
+      || (process.env.UPS_CLIENT_ID || process.env.FEDEX_CLIENT_ID || process.env.USPS_CLIENT_ID
+        ? 'multi'
+        : process.env.TRACKING_API_KEY ? 'aftership' : 'none')
+    ).toLowerCase(),
+    ups: {
+      clientId: process.env.UPS_CLIENT_ID || '',
+      clientSecret: process.env.UPS_CLIENT_SECRET || '',
+      accountNumber: process.env.UPS_ACCOUNT_NUMBER || '',
+      env: (process.env.UPS_ENV || 'production').toLowerCase(),
+      // UPS wants a source label on every call; it only shows up in their logs.
+      transactionSrc: process.env.UPS_TRANSACTION_SRC || 'pceagles-repairs',
+    },
+    fedex: {
+      clientId: process.env.FEDEX_CLIENT_ID || '',
+      clientSecret: process.env.FEDEX_CLIENT_SECRET || '',
+      env: (process.env.FEDEX_ENV || 'production').toLowerCase(),
+    },
+    usps: {
+      clientId: process.env.USPS_CLIENT_ID || '',
+      clientSecret: process.env.USPS_CLIENT_SECRET || '',
+      // USPS has moved these before, so neither is baked in.
+      apiBase: process.env.USPS_API_BASE || 'https://apis.usps.com',
+      trackPath: process.env.USPS_TRACK_PATH || '/tracking/v3/tracking/{tracking}?expand=DETAIL',
+    },
     apiKey: process.env.TRACKING_API_KEY || '',
     // Override if your account documents a different API version/host.
     apiBase: process.env.TRACKING_API_BASE || 'https://api.aftership.com/v4',

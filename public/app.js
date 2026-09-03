@@ -301,11 +301,37 @@ async function boot() {
 
   state.meta = await api('/meta');
   applyBrand(state.meta.brand);
+  renderFooter(state.meta);
   $('#dry-run-badge').hidden = !state.meta.dry_run_email;
   renderGoogleState(state.meta.google);
   renderStatusChips();
   await Promise.all([loadTickets(), loadStats()]);
   wireChrome();
+}
+
+/**
+ * What is running, in the footer. Worth having on screen: "did my deploy
+ * actually land" and "which version is the one misbehaving" are otherwise
+ * answered by guesswork, and a browser will happily serve a cached old app.js.
+ */
+function renderFooter(meta) {
+  const b = (meta && meta.build) || {};
+  const bits = [`v${b.version || '?'}`];
+  if (b.commit) bits.push(b.commit);
+  if (b.built_at) {
+    const d = new Date(b.built_at);
+    if (!Number.isNaN(d.getTime())) bits.push(`built ${d.toLocaleDateString()}`);
+  }
+  const el = $('#foot-version');
+  if (el) {
+    el.textContent = bits.join(' · ');
+    el.title = `Node ${b.node || '?'} · ${b.env || '?'}`;
+  }
+  const note = $('#foot-note');
+  if (note) {
+    const org = (meta && meta.org_name) || '';
+    note.textContent = [org, b.env && b.env !== 'production' ? b.env : ''].filter(Boolean).join(' · ');
+  }
 }
 
 /** Paint the UI in whatever BRAND_* colours the server is configured with. */
@@ -356,6 +382,7 @@ function wireChrome() {
   $('#device-recent-btn').addEventListener('click', loadRecentDevices);
   $('#refresh-emails').addEventListener('click', loadEmailLog);
   $('#loaner-refresh').addEventListener('click', () => loadLoaners(true));
+  $('#loaner-dispatch').addEventListener('click', () => openDispatchForm());
   $('#inv-refresh').addEventListener('click', () => loadInventoryView(true));
   $('#inv-add').addEventListener('click', () => (state.invTab === 'incoming' ? openShipmentForm() : openItemForm()));
   let invTimer;
@@ -1369,6 +1396,8 @@ async function showDevice(device) {
 // ---------------------------------------------------------------- loaners page
 const LOANER_FILTERS = [
   { key: 'out', label: 'All out' },
+  { key: 'fleet', label: 'The whole fleet' },
+  { key: 'no_ticket', label: 'No repair attached' },
   { key: 'overdue', label: 'Overdue' },
   { key: 'due_soon', label: 'Due today / tomorrow' },
   { key: 'after_repair', label: 'Repair done, still out' },
@@ -1434,12 +1463,14 @@ function filteredLoaners() {
     case 'due_soon': return loaners.filter((l) => l.due_today || l.due_tomorrow);
     case 'after_repair': return loaners.filter((l) => l.repair_done_at && l.days_since_repair_done >= 1);
     case 'undated': return loaners.filter((l) => !l.due_day);
+    case 'no_ticket': return loaners.filter((l) => !l.ticket_id);
     case 'returned': return returned || [];
     default: return loaners;
   }
 }
 
 function renderLoanerTable() {
+  if (state.loanerFilter === 'fleet') return renderLoanerFleet();
   const rows = filteredLoaners();
   const returnedView = state.loanerFilter === 'returned';
   if (!rows.length) {
@@ -1447,47 +1478,269 @@ function renderLoanerTable() {
     return;
   }
   $('#loaner-table').innerHTML = `<table class="bordered cards"><thead><tr>
-      <th>Loaner</th><th>Student</th><th>${returnedView ? 'Returned' : 'Due'}</th>
-      <th>Days out</th><th>Since repair done</th><th>Repair ticket</th><th>Reminders</th><th></th>
-    </tr></thead><tbody>${rows.map((l) => `<tr data-ticket="${l.ticket_id}">
+      <th>Loaner</th><th>Student</th><th>Why</th><th>Their device</th>
+      <th>${returnedView ? 'Returned' : 'Due'}</th>
+      <th>Days out</th><th>Repair</th><th>Reminders</th><th></th>
+    </tr></thead><tbody>${rows.map((l) => `<tr data-loan="${l.id}">
       <td data-label="Loaner"><b>${esc(l.loaner_asset_tag || l.loaner_serial || '?')}</b>
         <div class="small muted">${esc(l.loaner_model || '')}</div></td>
       <td data-label="Student">${esc(l.user_name || l.user_email || '-')}
         ${l.user_name && l.user_email ? `<div class="small muted">${esc(l.user_email)}</div>` : ''}</td>
+      <td data-label="Why"><span class="pill" style="background:${l.reason === 'repair' ? 'var(--brand)' : 'var(--muted)'}">${esc(l.reason_label)}</span>
+        ${l.reason_note ? `<div class="small muted">${esc(l.reason_note)}</div>` : ''}</td>
+      <td data-label="Their device" class="small">${l.own_asset_tag || l.own_serial
+        ? `${esc(l.own_asset_tag || l.own_serial)}<div class="muted">${esc(ownStateLabel(l.own_device_state))}</div>`
+        : '<span class="muted">not recorded</span>'}</td>
       <td data-label="${returnedView ? 'Returned' : 'Due'}" ${returnedView ? '' : dueClass(l)}>
         ${returnedView ? esc(relTime(l.loaner_returned_at)) : l.due_day ? `${esc(l.due_day)}${l.overdue ? ` (${esc(l.school_days_overdue)} school days over)` : l.due_today ? ' (today)' : ''}` : '<span class="muted">not set</span>'}</td>
-      <td data-label="Days out">${esc(l.days_out == null ? '-' : l.days_out)}</td>
-      <td data-label="Since repair done">${l.repair_done_at ? esc(l.days_since_repair_done) : '<span class="muted">still open</span>'}</td>
-      <td data-label="Ticket">#${esc(l.ticket_id)} <span class="small muted">${esc(l.status_label)}</span></td>
+      <td data-label="Days out">${esc(l.days_out == null ? '-' : l.days_out)}
+        ${l.repair_done_at && l.days_since_repair_done >= 1 ? `<div class="small" style="color:var(--warn)">${esc(l.days_since_repair_done)} since repair done</div>` : ''}</td>
+      <td data-label="Repair">${l.ticket_id
+        ? `#${esc(l.ticket_id)} <span class="small muted">${esc(statusMeta(l.ticket_status).label)}</span>`
+        : '<span class="muted small">none</span>'}</td>
       <td data-label="Reminders" class="small muted">${l.reminder_count ? esc(l.reminders.map((r) => r.kind.replace(/_/g, ' ')).join(', ')) : 'none'}</td>
       <td class="row-actions">
-        ${returnedView ? '' : `<button class="btn sm" data-return="${l.ticket_id}">Returned</button>
-        <button class="btn ghost sm" data-extend="${l.ticket_id}">+5 days</button>`}
-        <button class="btn ghost sm" data-open="${l.ticket_id}">Ticket</button>
+        ${returnedView ? '' : `<button class="btn sm" data-return-loan="${l.id}">Returned</button>
+        <button class="btn ghost sm" data-extend-loan="${l.id}">+5 days</button>`}
+        ${l.ticket_id ? `<button class="btn ghost sm" data-open="${l.ticket_id}">Ticket</button>` : ''}
       </td>
     </tr>`).join('')}</tbody></table>`;
 
-  $$('#loaner-table [data-return]').forEach((b) =>
+  $$('#loaner-table [data-return-loan]').forEach((b) =>
+    b.addEventListener('click', () => openReturnForm(rows.find((l) => String(l.id) === b.dataset.returnLoan))));
+  $$('#loaner-table [data-extend-loan]').forEach((b) =>
     b.addEventListener('click', async () => {
       b.disabled = true;
       try {
-        await api(`/tickets/${b.dataset.return}/loaner/return`, { method: 'POST' });
-        toast('Marked returned');
-        await loadLoaners(true);
-      } catch (err) { toast(err.message, true); b.disabled = false; }
-    })
-  );
-  $$('#loaner-table [data-extend]').forEach((b) =>
-    b.addEventListener('click', async () => {
-      b.disabled = true;
-      try {
-        const res = await api(`/tickets/${b.dataset.extend}/loaner/due`, { method: 'PATCH', body: { extend_school_days: 5 } });
-        toast(`Due ${res.due_day}`);
+        const loan = rows.find((l) => String(l.id) === b.dataset.extendLoan);
+        const day = await extendLoan(loan);
+        toast(`Due ${day}`);
         await loadLoaners(true);
       } catch (err) { toast(err.message, true); b.disabled = false; }
     })
   );
   $$('#loaner-table [data-open]').forEach((b) => b.addEventListener('click', () => openTicket(Number(b.dataset.open))));
+}
+
+const ownStateLabel = (value) => {
+  const list = (state.meta.loaner && state.meta.loaner.own_device_states) || [];
+  const hit = list.find((s) => s.value === value);
+  return hit ? hit.label : value || '';
+};
+
+/** Push a loan's due date out. Ticketless loans have no ticket route to use. */
+async function extendLoan(loan) {
+  if (loan.ticket_id) {
+    const res = await api(`/tickets/${loan.ticket_id}/loaner/due`, { method: 'PATCH', body: { extend_school_days: 5 } });
+    return res.due_day;
+  }
+  const base = loan.due_day && loan.due_day > new Date().toISOString().slice(0, 10) ? loan.due_day : null;
+  const start = base ? new Date(base + 'T12:00:00') : new Date();
+  // Five *school* days is server-side arithmetic; ask for it by date instead.
+  const target = new Date(start.getTime());
+  let added = 0;
+  while (added < 5) {
+    target.setDate(target.getDate() + 1);
+    const dow = target.getDay();
+    if (dow !== 0 && dow !== 6) added += 1;
+  }
+  const day = target.toISOString().slice(0, 10);
+  const res = await api('/loans/' + loan.id, { method: 'PATCH', body: { due_at: day } });
+  return res.loan.due_day;
+}
+
+/**
+ * Hand out a loaner with no repair attached.
+ *
+ * The reason is mandatory and it is the second field, right under the loaner,
+ * because it is the thing that gets skipped when a form asks for it last.
+ */
+function openDispatchForm(prefill = {}) {
+  const reasons = (state.meta.loaner && state.meta.loaner.reasons) || [];
+  const ownStates = (state.meta.loaner && state.meta.loaner.own_device_states) || [];
+  const { close, node } = subOverlay(`<div class="modal">
+    <header><h2>Hand out a loaner</h2><div style="flex:1"></div>
+      <button class="btn ghost sm" data-x="dsp-cancel">Cancel</button></header>
+    <div class="body">
+      <div class="row">
+        <label class="field" style="flex:1 1 200px"><span>Loaner asset tag</span>
+          <input type="text" id="dsp-loaner" value="${esc(prefill.loaner_asset_tag || '')}" placeholder="Loaner-012 or just 12"></label>
+        <label class="field" style="flex:1 1 200px"><span>Due back</span>
+          <input type="date" id="dsp-due"></label>
+      </div>
+      <div class="row">
+        <label class="field" style="flex:1 1 240px"><span>Why do they need it?</span>
+          <select id="dsp-reason">${reasons.map((r) => `<option value="${esc(r.value)}"${r.value === 'left_at_home' ? ' selected' : ''}>${esc(r.label)}</option>`).join('')}</select></label>
+        <label class="field" style="flex:2 1 260px"><span id="dsp-note-label">Note</span>
+          <input type="text" id="dsp-note" placeholder="anything worth remembering later"></label>
+      </div>
+      <div class="row">
+        <label class="field" style="flex:1 1 220px"><span>Student email</span>
+          <input type="email" id="dsp-email" value="${esc(prefill.borrower_email || '')}" placeholder="sam@pceagles.org"></label>
+        <label class="field" style="flex:1 1 180px"><span>Student name</span>
+          <input type="text" id="dsp-name" value="${esc(prefill.borrower_name || '')}"></label>
+      </div>
+      <h2 style="font-size:14px;margin:16px 0 6px">Their own device <span class="muted" style="font-weight:400">optional</span></h2>
+      <div class="row">
+        <label class="field" style="flex:1 1 200px"><span>Asset tag or serial</span>
+          <input type="text" id="dsp-own" placeholder="24-1"></label>
+        <label class="field" style="flex:1 1 200px"><span>Where is it?</span>
+          <select id="dsp-own-state">${ownStates.map((o) => `<option value="${esc(o.value)}"${o.value === 'with_student' ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}</select></label>
+      </div>
+      <label class="field"><span>Attach to a repair ticket (optional)</span>
+        <input type="number" id="dsp-ticket" min="1" placeholder="ticket number, if there is one"></label>
+      <div id="dsp-result"></div>
+    </div>
+    <footer><div style="flex:1"></div><button class="btn primary" id="dsp-go">Hand it out</button></footer>
+  </div>`);
+  $('[data-x=dsp-cancel]', node).addEventListener('click', close);
+  attachScanner($('#dsp-loaner', node), () => {});
+  addScanButton($('#dsp-loaner', node), () => {});
+  attachScanner($('#dsp-own', node), () => {});
+  addScanButton($('#dsp-own', node), () => {});
+
+  // Say out loud when the note is required, rather than failing on submit.
+  const syncNote = () => {
+    const meta = reasons.find((r) => r.value === $('#dsp-reason', node).value);
+    const need = Boolean(meta && meta.requires_note);
+    $('#dsp-note-label', node).textContent = need ? 'Note (required)' : 'Note';
+    $('#dsp-note', node).placeholder = need ? 'what happened?' : 'anything worth remembering later';
+  };
+  $('#dsp-reason', node).addEventListener('change', syncNote);
+  syncNote();
+
+  const submit = async (force) => {
+    const body = {
+      loaner_asset_tag: cleanScan($('#dsp-loaner', node).value),
+      reason: $('#dsp-reason', node).value,
+      reason_note: $('#dsp-note', node).value.trim(),
+      borrower_email: $('#dsp-email', node).value.trim(),
+      borrower_name: $('#dsp-name', node).value.trim(),
+      own_asset_tag: cleanScan($('#dsp-own', node).value),
+      own_device_state: $('#dsp-own-state', node).value,
+      ticket_id: $('#dsp-ticket', node).value ? Number($('#dsp-ticket', node).value) : null,
+      force: Boolean(force),
+    };
+    const due = $('#dsp-due', node).value;
+    if (due) body.due_at = due;
+    return api('/loans', { method: 'POST', body });
+  };
+
+  $('#dsp-go', node).addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    try {
+      const res = await submit(false);
+      toast(`${res.loan.loaner_asset_tag} out to ${res.loan.borrower_email}`);
+      close();
+      await loadLoaners(true);
+    } catch (err) {
+      // "already has one out" is a question, not a wall - offer the override.
+      const overridable = /already has/.test(err.message || '');
+      $('#dsp-result', node).innerHTML = `<div class="result-line err">${esc(err.message)}</div>
+        ${overridable ? '<button class="btn sm" id="dsp-force" style="margin-top:8px">Hand out a second one anyway</button>' : ''}`;
+      if ($('#dsp-force', node)) {
+        $('#dsp-force', node).addEventListener('click', async (ev) => {
+          ev.target.disabled = true;
+          try {
+            const res = await submit(true);
+            toast(`${res.loan.loaner_asset_tag} out to ${res.loan.borrower_email}`);
+            close();
+            await loadLoaners(true);
+          } catch (err2) { $('#dsp-result', node).innerHTML = `<div class="result-line err">${esc(err2.message)}</div>`; }
+        });
+      }
+      e.target.disabled = false;
+    }
+  });
+}
+
+/** Taking one back: condition matters, and damage has to be described. */
+function openReturnForm(loan) {
+  if (!loan) return;
+  const { close, node } = subOverlay(`<div class="modal" style="width:min(480px,calc(100% - 32px))">
+    <header><h2>${esc(loan.loaner_asset_tag || loan.loaner_serial)} back in</h2><div style="flex:1"></div>
+      <button class="btn ghost sm" data-x="ret-cancel">Cancel</button></header>
+    <div class="body">
+      <p class="small muted" style="margin-top:0">From ${esc(loan.user_name || loan.user_email)},
+        out ${esc(loan.days_out == null ? '?' : loan.days_out)} days${loan.overdue ? ', overdue' : ''}.</p>
+      <label class="field"><span>Condition</span>
+        <select id="ret-condition">
+          <option value="ok">Fine</option>
+          <option value="damaged">Damaged</option>
+        </select></label>
+      <label class="field"><span id="ret-note-label">Note</span>
+        <input type="text" id="ret-note" placeholder="optional"></label>
+      <div id="ret-result"></div>
+    </div>
+    <footer><div style="flex:1"></div><button class="btn primary" id="ret-go">Mark returned</button></footer>
+  </div>`);
+  $('[data-x=ret-cancel]', node).addEventListener('click', close);
+  const syncNote = () => {
+    const need = $('#ret-condition', node).value === 'damaged';
+    $('#ret-note-label', node).textContent = need ? 'What is the damage? (required)' : 'Note';
+    $('#ret-note', node).placeholder = need ? 'cracked lid corner' : 'optional';
+  };
+  $('#ret-condition', node).addEventListener('change', syncNote);
+  $('#ret-go', node).addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    try {
+      await api(`/loans/${loan.id}/return`, {
+        method: 'POST',
+        body: { condition: $('#ret-condition', node).value, note: $('#ret-note', node).value.trim() },
+      });
+      toast('Back on the shelf');
+      close();
+      await loadLoaners(true);
+    } catch (err) {
+      $('#ret-result', node).innerHTML = `<div class="result-line err">${esc(err.message)}</div>`;
+      e.target.disabled = false;
+    }
+  });
+}
+
+/** The whole loaner pool: what is free, what is out, what is missing. */
+async function renderLoanerFleet() {
+  const box = $('#loaner-table');
+  box.innerHTML = '<span class="spinner"></span> Reading the loaner org unit&hellip;';
+  let data;
+  try {
+    data = await api('/loaners/fleet');
+  } catch (err) {
+    box.innerHTML = `<div class="result-line err">${esc(err.message)}</div>`;
+    return;
+  }
+  const { devices, stats, not_in_org_unit: strays } = data;
+  box.innerHTML = `
+    <p class="small muted" style="margin:0 0 8px">${esc(stats.available)} free of ${esc(stats.total)}
+      in ${esc((state.meta.loaner && state.meta.loaner.org_unit) || 'the loaner org unit')}.</p>
+    ${strays.length ? `<div class="banner warn">${esc(strays.length)} loan${strays.length === 1 ? '' : 's'}
+      on a device that is not in that org unit:
+      ${strays.map((l) => esc(l.loaner_asset_tag || l.loaner_serial)).join(', ')}.
+      Either move the device into the loaner OU or fix the tag on the loan.</div>` : ''}
+    <table class="bordered cards"><thead><tr>
+      <th>Asset tag</th><th>Model</th><th>State</th><th>Who has it</th><th>Due</th><th></th>
+    </tr></thead><tbody>${devices.map((d) => `<tr>
+      <td data-label="Asset tag"><b>${esc(d.asset_tag || '(no tag)')}</b>
+        <div class="small muted mono">${esc(d.serial || '')}</div></td>
+      <td data-label="Model" class="small">${esc(d.model || '')}</td>
+      <td data-label="State"><span class="pill" style="background:${d.out ? 'var(--muted)' : 'var(--ok)'}">${d.out ? 'out' : 'free'}</span></td>
+      <td data-label="Who has it" class="small">${d.out
+        ? `${esc(d.loan.borrower_name || d.loan.borrower_email)}<div class="muted">${esc(d.loan.reason_label)}</div>`
+        : '<span class="muted">-</span>'}</td>
+      <td data-label="Due" class="small" ${d.out && d.loan.overdue ? 'style="color:var(--danger);font-weight:600"' : ''}>
+        ${d.out ? esc(d.loan.due_day || 'not set') : ''}</td>
+      <td class="row-actions">${d.out
+        ? `<button class="btn ghost sm" data-fleet-return="${d.loan.id}">Returned</button>`
+        : `<button class="btn sm" data-fleet-out="${esc(d.asset_tag || d.serial)}">Hand out</button>`}</td>
+    </tr>`).join('')}</tbody></table>`;
+
+  $$('#loaner-table [data-fleet-out]').forEach((b) =>
+    b.addEventListener('click', () => openDispatchForm({ loaner_asset_tag: b.dataset.fleetOut })));
+  $$('#loaner-table [data-fleet-return]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      const loan = (state.loanerData.loaners || []).find((l) => String(l.id) === b.dataset.fleetReturn);
+      if (loan) openReturnForm(loan);
+    }));
 }
 
 function renderLoanerReminderCard() {

@@ -38,17 +38,8 @@ function ticketEvent(ticketId, body, author = 'system') {
 // --- carriers ----------------------------------------------------------------
 
 /** Guess the carrier from the tracking number so nobody has to pick from a list. */
-function detectCarrier(tracking) {
-  const t = String(tracking || '').replace(/[\s-]/g, '').toUpperCase();
-  if (!t) return null;
-  if (/^1Z[0-9A-Z]{16}$/.test(t)) return 'ups';
-  if (/^T\d{10}$/.test(t)) return 'ups';
-  if (/^TBA\d{9,}$/.test(t)) return 'amazon';
-  if (/^(94|93|92|95|82)\d{18,20}$/.test(t)) return 'usps';
-  if (/^[A-Z]{2}\d{9}[A-Z]{2}$/.test(t)) return 'usps';
-  if (/^(96\d{20}|\d{15}|\d{12})$/.test(t)) return 'fedex';
-  return null;
-}
+// Shared with the tracking providers, which need it without importing this file.
+const { detectCarrier } = require('./tracking/carriers');
 
 const TRACK_URL = {
   ups: (t) => `https://www.ups.com/track?tracknum=${encodeURIComponent(t)}`,

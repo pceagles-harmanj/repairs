@@ -17,10 +17,10 @@ Work through it in order; each step says how to check it worked.
 | --- | --- |
 | Container IP | `192.168.10.60` (static) |
 | Hostname | `repairs.internal.pceagles.org` |
-| Tech app | `http://repairs.internal.pceagles.org:8080` |
-| Student site | `http://repairs.internal.pceagles.org:8081` |
+| Tech app | `http://repairs.internal.pceagles.org:7613` |
+| Student site | `http://repairs.internal.pceagles.org:80` |
 | BIND server | `192.168.10.50` |
-| NAS share | `//192.168.10.20/backups/repairs` |
+| NAS share | `//192.168.10.230/RepairServer` |
 
 Change them in `deploy/proxmox-lxc-create.sh` and `deploy/env.production.example`
 if yours differ.
@@ -279,7 +279,7 @@ conditional forwarder for `internal.pceagles.org`).
 
 ---
 
-## 8. Google OAuth and AfterShip
+## 8. Google OAuth and carrier tracking
 
 **Google Cloud console → Credentials → your Web client:**
 
@@ -311,6 +311,50 @@ number, never overnight, and never re-checks one that has been received.
 
 ---
 
+## 8b. Carrier tracking, without paying for it
+
+`TRACKING_PROVIDER=multi` reads each tracking number, works out which carrier it
+belongs to, and calls that carrier's own API. UPS, FedEx and USPS all give
+tracking away free, so an aggregator is only worth paying for if parcels arrive
+on something none of them cover.
+
+| Carrier | Where to register | What you get |
+|---|---|---|
+| UPS | developer.ups.com | Client id + secret, OAuth client-credentials |
+| FedEx | developer.fedex.com | Client id + secret (a "project"), same flow |
+| USPS | developers.usps.com | Consumer key + secret, needs a USPS business account |
+| Amazon | nothing to register | No public API - see below |
+
+Set only the carriers you order from. A parcel on a carrier you have not
+configured is reported as unpollable rather than as an error.
+
+### Amazon, honestly
+
+There is no free public API for tracking something you bought on Amazon. The
+Amazon Shipping API is for merchants who ship *with* Amazon; it does not let a
+customer follow their own order. So Amazon Logistics parcels (`TBA...` numbers)
+stay manual: the status is whatever a human sets, the tracking link still works,
+and the poller marks them unpollable once instead of logging the same error
+every three hours.
+
+The useful workaround is a fact about how Amazon ships: a lot of orders go out
+via UPS, FedEx or USPS. When they do, paste **that** carrier's number and it
+tracks automatically. The number's format decides which API is used, whatever
+the vendor field says - so a shipment labelled "Amazon Business" with a `1Z`
+number is polled as UPS.
+
+### Checking it works
+
+```bash
+# Settings shows which carriers are live; or from the shell inside the container:
+docker compose exec repairs node -e "console.log(require('./src/tracking').status())"
+```
+
+`carriers_ready` lists the carriers with working credentials. `manual_carriers`
+lists the ones that will always need a human.
+
+---
+
 ## 9. The plain-HTTP consequences (and the fix)
 
 Browsers treat `http://` origins as insecure, which switches off two things:
@@ -331,8 +375,9 @@ http://repairs.internal.pceagles.org:8081
 ```
 
 Camera scanning and installability come back on managed devices. Personal phones
-will not have this, which is another argument for a certificate eventually — at
-which point set `TLS_CERT_PATH`/`TLS_KEY_PATH` and change the URLs to `https`.
+will not have this, which is the argument for a certificate — see **§9b**, which
+gets you a real Let's Encrypt certificate without exposing anything, after which
+these policy entries can be removed.
 
 The scan button no longer hides itself when the camera is unavailable. Pressing
 it explains which of the three blocks is in the way — insecure origin, no camera
@@ -342,6 +387,126 @@ ships the barcode reader on **ChromeOS, Android and macOS but not on Windows or
 Linux desktops**, so a tech on a Windows PC will get the "no built-in barcode
 reader" message even after the policy is right. Chromebooks, phones, and
 handheld scanners all work.
+
+---
+
+## 9b. Turning on HTTPS (Let's Encrypt, nothing exposed)
+
+You do **not** need Caddy. The app terminates TLS itself - set `TLS_CERT_PATH`
+and `TLS_KEY_PATH` and `listen()` serves https instead of http. A reverse proxy
+would only add a third thing to keep alive.
+
+You also do **not** need to expose anything. The DNS-01 challenge proves you
+control the name by publishing a TXT record, so Let's Encrypt never connects to
+`192.168.10.60`. No port forward, no inbound rule.
+
+### The one public DNS record
+
+Network Solutions has no DNS API that acme.sh can drive, so instead of letting
+automation touch your real zone, delegate just the challenge label once:
+
+```
+Name:  _acme-challenge.repairs.internal
+Type:  CNAME
+Value: _acme-challenge.acme.pceagles.org.
+```
+
+`acme.pceagles.org` is a zone you host somewhere with an API - Cloudflare's free
+tier is the usual choice - or an acme-dns registration. Two things worth saying
+plainly about this record:
+
+- It is the **only** change you ever make at the registrar. Renewals write TXT
+  records in the delegated zone, forever, without touching Network Solutions.
+- `_acme-challenge.repairs.internal` exists for certificate validation and
+  nothing else. It cannot affect mail, the website, or any other name in
+  `pceagles.org`. There is no MX, SPF, or A record involved.
+
+Your internal A record stays exactly as it is: `repairs.internal.pceagles.org`
+→ `192.168.10.60`, served by your own BIND at each campus. A public certificate
+for a name that only resolves internally is perfectly valid - Let's Encrypt
+certifies the *name*, not where it points.
+
+### Issue the certificate
+
+On the LXC (the Docker host), as root:
+
+```bash
+cd /opt/repairs
+export CF_Token=...            # or the acme-dns variables
+./deploy/tls-letsencrypt.sh setup
+```
+
+It installs acme.sh, checks that CNAME exists (and prints the record to create
+if it does not), issues the certificate with `--challenge-alias`, and installs
+it to `/etc/repairs-tls/`. acme.sh adds its own daily cron entry, so renewal at
+~60 days is hands-off; `--install-cert` re-copies the files and restarts the
+container each time.
+
+### Switch the app over
+
+`docker-compose.prod.yml` already mounts `/etc/repairs-tls` read-only. Uncomment
+the TLS port lines, then in `.env`:
+
+```ini
+TLS_CERT_PATH=/etc/repairs-tls/fullchain.pem
+TLS_KEY_PATH=/etc/repairs-tls/privkey.pem
+
+PUBLIC_URL=https://repairs.internal.pceagles.org:8443
+PUBLIC_SITE_URL=https://repairs.internal.pceagles.org
+OAUTH_REDIRECT_URI=https://repairs.internal.pceagles.org:8443/oauth2/callback
+PUBLIC_OAUTH_REDIRECT_URI=https://repairs.internal.pceagles.org
+
+# Keep the links already sitting in inboxes working.
+PUBLIC_TLS_REDIRECT_HTTP_PORT=8081
+```
+
+Then map the ports on the host: `443 -> 8443` for the student site (or run it on
+8443 directly), and `80 -> 8081` so the redirect listener catches old links.
+
+### Do not forget the two Google entries
+
+Both redirect URIs are registered in the Cloud console and must match the new
+scheme exactly, or sign-in breaks with `redirect_uri_mismatch`:
+
+- **Authorized redirect URIs** - add the two `https://` URLs above. Leave the
+  old `http://` ones in place until you are sure, then remove them.
+- Run `npm run check-oauth` afterwards; it compares .env against what Google
+  will accept.
+
+### The links already in people's inboxes
+
+Every magic link emailed so far starts with `http://`. `PUBLIC_TLS_REDIRECT_HTTP_PORT`
+starts a listener whose only answer is a 302 to the https origin, keeping the
+path and query - so an old link still opens the right ticket.
+
+Two deliberate details in that listener: it redirects to the **configured**
+hostname rather than whatever `Host` the request carried (reflecting it would
+make the thing an open redirect, and a magic-link URL is precisely what you do
+not want bounced elsewhere), and it uses 302 rather than 301, because a
+permanent redirect is cached by browsers effectively forever and would be
+painful if the certificate ever had to come back out.
+
+### What you get for it
+
+- **Camera barcode scanning and "install app" work with no Chrome policy.** They
+  need a secure context, which https simply is. The
+  `OverrideSecurityRestrictionsOnInsecureOrigin` entries from §9 can come out.
+- **Personal phones on the school wifi** trust it with no warning and nothing to
+  install - the reason this beats an internal CA here.
+- Passwords and session cookies stop crossing the LAN in the clear.
+
+### Verifying
+
+```bash
+# from a workstation
+openssl s_client -connect repairs.internal.pceagles.org:443 -servername repairs.internal.pceagles.org </dev/null 2>/dev/null | openssl x509 -noout -subject -issuer -enddate
+curl -sI http://repairs.internal.pceagles.org/t/test | head -3   # expect 302 to https
+./deploy/tls-letsencrypt.sh status
+```
+
+If issuance fails, `--debug 2` on the acme.sh command shows the challenge
+exchange. The usual cause is the CNAME not having propagated yet - Network
+Solutions can take 30+ minutes.
 
 ---
 
@@ -365,6 +530,42 @@ handheld scanners all work.
 Both are in **[NETWORK-HA.md](NETWORK-HA.md)**: a WireGuard site-to-site tunnel so
 GS reaches this one server (config templates and a setup script live in
 `deploy/wireguard/`), and a Proxmox HA plan for when a second host exists.
+
+## Setting the version
+
+The footer on the tech site reads `v0.3.0 · a3f91c2 · built 9/3/2026`. Those
+three parts come from three different places.
+
+**The version** lives in `package.json` and is the only one you set by hand:
+
+```bash
+npm version minor --no-git-tag-version    # 0.3.0 -> 0.4.0
+npm version patch --no-git-tag-version    # 0.3.0 -> 0.3.1
+npm version 0.5.0 --no-git-tag-version    # straight to a number
+```
+
+Drop `--no-git-tag-version` if you want npm to commit the bump and tag it. Or
+just edit the `"version"` line in `package.json` - nothing clever reads it.
+
+**The commit and build date** are build arguments, so they cannot be wrong: they
+describe the image, not the source tree it came from. Build with:
+
+```bash
+npm run docker:build      # stamps both from git and the clock, then builds
+npm run docker:up         # the same, then restarts the container
+```
+
+If you build with a bare `docker compose build`, those two are simply blank and
+the footer shows `v0.3.0` on its own. That still answers the question the footer
+exists for - "is the version I just deployed the one being served, or is my
+browser holding a cached app.js".
+
+To check what a running container thinks it is:
+
+```bash
+docker compose -f deploy/docker-compose.prod.yml exec repairs npm run version:show
+curl -s http://repairs.internal.pceagles.org:8080/api/meta | grep -o '"build":{[^}]*}'
+```
 
 ## Day-to-day
 

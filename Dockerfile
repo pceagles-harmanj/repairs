@@ -31,6 +31,14 @@ FROM node:22-bookworm-slim
 ENV NODE_ENV=production
 WORKDIR /app
 
+# Stamped at build time so the footer can name the running build:
+#   docker compose build --build-arg GIT_COMMIT=$(git rev-parse HEAD) \
+#                        --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+ARG GIT_COMMIT=""
+ARG BUILD_DATE=""
+ENV GIT_COMMIT=$GIT_COMMIT
+ENV BUILD_DATE=$BUILD_DATE
+
 # Compiled dependencies from the builder; application code from the repo.
 # .dockerignore keeps the host's node_modules, database and .env out of here.
 COPY --from=build /app/node_modules ./node_modules

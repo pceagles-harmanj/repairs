@@ -7,6 +7,7 @@ const google = require('../google');
 const { resetTemplates } = require('../db');
 const backup = require('../backup');
 const loaners = require('../loaners');
+const loans = require('../loans');
 const inventory = require('../inventory');
 const models = require('../models');
 const shipments = require('../shipments');
@@ -23,6 +24,7 @@ router.get('/meta', (req, res) => {
   res.json({
     statuses: STATUSES,
     priorities: PRIORITIES,
+    build: config.build,
     org_name: config.orgName,
     helpdesk_name: config.helpdeskName,
     dry_run_email: config.dryRunEmail,
@@ -45,6 +47,9 @@ router.get('/meta', (req, res) => {
       tag_pad: config.loaner.tagPad,
       due_school_days: config.loanerDue.schoolDays,
       reminders_enabled: config.loanerDue.remindersEnabled,
+      reasons: loans.REASONS,
+      own_device_states: loans.OWN_DEVICE_STATES,
+      return_conditions: loans.RETURN_CONDITIONS,
     },
     loaner_template_keys: require('../lib/email-templates').LOANER_TEMPLATE_KEYS,
     parts_template_keys: require('../lib/email-templates').PARTS_TEMPLATE_KEYS,
@@ -268,6 +273,156 @@ router.post('/tickets/:id/loaner', async (req, res) => {
   res.json({ ticket: tickets.detail(id), device, in_loaner_ou: google.isLoaner(device) });
 });
 
+// ---- loans: a loaner out, with or without a repair -------------------------
+router.get('/loans', (req, res) => {
+  const open = str(req.query.open);
+  res.json({
+    loans: loans.list({
+      open: open === '0' ? false : open === 'all' ? null : true,
+      borrowerEmail: str(req.query.email) || null,
+      limit: Number(str(req.query.limit)) || 500,
+    }),
+    reasons: loans.REASONS,
+    own_device_states: loans.OWN_DEVICE_STATES,
+    stats: loaners.stats(),
+  });
+});
+
+router.post('/loans', async (req, res, next) => {
+  try {
+    const body = { ...(req.body || {}) };
+    // A scanned or typed loaner tag is resolved against the loaner org unit, so
+    // the loan carries the real Google device rather than free text.
+    if (body.loaner_asset_tag && !body.loaner_device_id) {
+      try {
+        const hits = await google.searchLoaners(body.loaner_asset_tag, { limit: 5 });
+        const exact = hits.find((d) => d.exact) || (hits.length === 1 ? hits[0] : null);
+        if (exact) {
+          body.loaner_device_id = exact.device_id;
+          body.loaner_asset_tag = exact.asset_tag || body.loaner_asset_tag;
+          body.loaner_serial = exact.serial || body.loaner_serial || null;
+          body.loaner_model = exact.model || body.loaner_model || null;
+        } else {
+          body.loaner_asset_tag = google.normalizeLoanerTag(body.loaner_asset_tag);
+        }
+      } catch {
+        // Google being unreachable must not stop a tech handing out a machine.
+        body.loaner_asset_tag = google.normalizeLoanerTag(body.loaner_asset_tag);
+      }
+    }
+    // Same for the student's own device, looked up across the whole fleet.
+    if (body.own_asset_tag && !body.own_device_id) {
+      try {
+        const hits = await google.searchDevices(body.own_asset_tag, { limit: 5 });
+        const exact = hits.find((d) => d.exact) || (hits.length === 1 ? hits[0] : null);
+        if (exact) {
+          body.own_device_id = exact.device_id;
+          body.own_asset_tag = exact.asset_tag || body.own_asset_tag;
+          body.own_serial = exact.serial || body.own_serial || null;
+          body.own_model = exact.model || body.own_model || null;
+        }
+      } catch { /* free text is fine */ }
+    }
+
+    const loan = loans.issue(body, { author: authorOf(req), force: Boolean(body.force) });
+    // Best effort, and after the loan is safely recorded.
+    const note = await loans.noteOnLoaner(
+      loan,
+      `Loaned to ${loan.borrower_email} (${loan.reason_label})${loan.due_day ? `, due ${loan.due_day}` : ''}`
+    );
+    res.status(201).json({ loan, google_note: note });
+  } catch (err) {
+    if (err.statusCode === 409) return res.status(409).json({ error: err.message, existing: err.existing || null });
+    next(err);
+  }
+});
+
+router.get('/loans/:id', (req, res) => {
+  const loan = loans.get(Number(req.params.id));
+  if (!loan) return res.status(404).json({ error: 'No such loan' });
+  res.json({ loan, reasons: loans.REASONS, own_device_states: loans.OWN_DEVICE_STATES });
+});
+
+router.patch('/loans/:id', (req, res) => {
+  const loan = loans.update(Number(req.params.id), req.body || {}, { author: authorOf(req) });
+  if (!loan) return res.status(404).json({ error: 'No such loan' });
+  res.json({ loan });
+});
+
+router.post('/loans/:id/return', async (req, res, next) => {
+  try {
+    const { condition, note } = req.body || {};
+    const loan = loans.returnLoan(Number(req.params.id), {
+      author: authorOf(req), condition: condition || 'ok', note,
+    });
+    const gnote = await loans.noteOnLoaner(loan, `Returned by ${loan.borrower_email}${condition && condition !== 'ok' ? ` (${condition}: ${note || ''})` : ''}`);
+    res.json({ loan, google_note: gnote });
+  } catch (err) { next(err); }
+});
+
+// Attach a loan to a repair after the fact, or detach it (ticket_id: null).
+router.post('/loans/:id/ticket', (req, res, next) => {
+  try {
+    const { ticket_id: ticketId } = req.body || {};
+    res.json({ loan: loans.setTicket(Number(req.params.id), ticketId || null, { author: authorOf(req) }) });
+  } catch (err) {
+    if (err.statusCode === 409) return res.status(409).json({ error: err.message });
+    next(err);
+  }
+});
+
+router.delete('/loans/:id', (req, res) => {
+  res.json(loans.remove(Number(req.params.id)));
+});
+
+// ---- the loaner fleet ------------------------------------------------------
+/**
+ * Every device in the loaner org unit, with whether it is out and to whom.
+ * This is the "what can I hand out right now" question, which the pool endpoint
+ * on its own could not answer.
+ */
+router.get('/loaners/fleet', async (req, res, next) => {
+  try {
+    const devices = await google.loanerPool({ limit: Number(str(req.query.limit)) || 200 });
+    const open = loans.list({ open: true, limit: 1000 });
+    const byDevice = new Map();
+    const byTag = new Map();
+    for (const l of open) {
+      if (l.loaner_device_id) byDevice.set(l.loaner_device_id, l);
+      if (l.loaner_asset_tag) byTag.set(String(l.loaner_asset_tag).toLowerCase(), l);
+    }
+    const rows = devices.map((d) => {
+      const loan = byDevice.get(d.device_id) || byTag.get(String(d.asset_tag || '').toLowerCase()) || null;
+      return {
+        ...d,
+        out: Boolean(loan),
+        loan: loan
+          ? {
+            id: loan.id, borrower_email: loan.borrower_email, borrower_name: loan.borrower_name,
+            reason: loan.reason, reason_label: loan.reason_label, due_day: loan.due_day,
+            overdue: loan.overdue, ticket_id: loan.ticket_id, days_out: loan.days_out,
+          }
+          : null,
+      };
+    });
+    // Available first: this list exists to answer "what can I hand out".
+    rows.sort((a, b) => Number(a.out) - Number(b.out) || String(a.asset_tag || '').localeCompare(String(b.asset_tag || '')));
+    // Loans whose device is not in the OU at all - worth flagging rather than hiding.
+    const known = new Set(rows.map((r) => r.device_id));
+    const strays = open.filter((l) => !l.loaner_device_id || !known.has(l.loaner_device_id));
+    res.json({
+      devices: rows,
+      stats: {
+        total: rows.length,
+        available: rows.filter((r) => !r.out).length,
+        out: rows.filter((r) => r.out).length,
+        overdue: rows.filter((r) => r.loan && r.loan.overdue).length,
+      },
+      not_in_org_unit: strays,
+    });
+  } catch (err) { next(err); }
+});
+
 // ---- deployed loaners ------------------------------------------------------
 router.get('/loaners/out', (req, res) => {
   res.json({
@@ -290,11 +445,14 @@ router.patch('/tickets/:id/loaner/due', (req, res) => {
   const id = Number(req.params.id);
   const ticket = tickets.get(id);
   if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+  // Due dates belong to the loan now, so find this ticket's loan first.
+  const loan = loans.forTicket(id);
+  if (!loan) return res.status(400).json({ error: 'No loaner is issued on this ticket' });
   const { due_day: dueDay, extend_school_days: extend } = req.body || {};
   const day = extend !== undefined && extend !== null
-    ? loaners.extendDue(id, Number(extend), { author: authorOf(req) })
-    : loaners.setDue(id, dueDay, { author: authorOf(req) });
-  res.json({ due_day: day, ticket: tickets.detail(id) });
+    ? loaners.extendDue(loan.id, Number(extend), { author: authorOf(req) })
+    : loaners.setDue(loan.id, dueDay, { author: authorOf(req) });
+  res.json({ due_day: day, ticket: tickets.detail(id), loan: loans.get(loan.id) });
 });
 
 router.post('/tickets/:id/loaner/return', (req, res) => {

@@ -343,3 +343,112 @@ test('the progress list on the public page is in time order', async () => {
   assert.ok(pos('Out for delivery') < pos('Delivered to school'), order.join(' -> '));
   assert.ok(!/not yet/.test(progress), 'the merged list only shows stages that happened');
 });
+
+// ---- UPS directly, which costs nothing -------------------------------------
+
+/**
+ * config is read at require time, so credentials must be in place before the
+ * provider loads - and taken back out afterwards, or the "no provider
+ * configured" test above starts seeing a UPS provider.
+ */
+function withUps(fn) {
+  const before = { id: process.env.UPS_CLIENT_ID, secret: process.env.UPS_CLIENT_SECRET };
+  process.env.UPS_CLIENT_ID = 'test-client';
+  process.env.UPS_CLIENT_SECRET = 'test-secret';
+  delete require.cache[require.resolve('../src/config')];
+  delete require.cache[require.resolve('../src/tracking/providers/ups')];
+  const ups = require('../src/tracking/providers/ups');
+  const restore = () => {
+    if (before.id === undefined) delete process.env.UPS_CLIENT_ID; else process.env.UPS_CLIENT_ID = before.id;
+    if (before.secret === undefined) delete process.env.UPS_CLIENT_SECRET; else process.env.UPS_CLIENT_SECRET = before.secret;
+    delete require.cache[require.resolve('../src/config')];
+    delete require.cache[require.resolve('../src/tracking/providers/ups')];
+  };
+  return Promise.resolve(fn(ups)).finally(restore);
+}
+
+test('UPS status types map onto our own small vocabulary', () => {
+  const { fromUpsStatus } = require('../src/tracking/statuses');
+  assert.equal(fromUpsStatus({ type: 'M', description: 'Shipper created a label' }), 'pre_transit');
+  assert.equal(fromUpsStatus({ type: 'I', description: 'Departed from facility' }), 'in_transit');
+  assert.equal(fromUpsStatus({ type: 'O', description: 'Out for delivery' }), 'out_for_delivery');
+  assert.equal(fromUpsStatus({ type: 'D', description: 'Delivered' }), 'delivered');
+  assert.equal(fromUpsStatus({ type: 'X', description: 'Exception' }), 'exception');
+  assert.equal(fromUpsStatus(null), 'unknown');
+
+  // An unknown type falls back to the words rather than giving up.
+  assert.equal(fromUpsStatus({ type: 'ZZ', description: 'Delivered to the dock' }), 'delivered');
+  assert.equal(fromUpsStatus({ type: 'ZZ', description: 'Arrived at facility' }), 'in_transit');
+  assert.equal(fromUpsStatus({ type: 'ZZ', description: 'Who knows' }), 'unknown');
+});
+
+test('UPS date and time strings become one timestamp', () => {
+  const ups = require('../src/tracking/providers/ups');
+  assert.equal(ups.stamp('20260903', '141500'), '2026-09-03T14:15:00');
+  // Missing time is midday, not midnight: it stops a scan sorting into yesterday.
+  assert.equal(ups.stamp('20260903', null), '2026-09-03T12:00:00');
+  assert.equal(ups.stamp(null, '141500'), null);
+  assert.equal(ups.dayOf('20260903'), '2026-09-03');
+});
+
+test('a UPS response turns into events and a status', async () => withUps(async (ups) => {
+  const realFetch = global.fetch;
+  global.fetch = async (url) => {
+    if (String(url).includes('/oauth/token')) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ access_token: 'tok', expires_in: 3600 }) };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        trackResponse: {
+          shipment: [{
+            package: [{
+              trackingNumber: '1Z999AA10123456784',
+              currentStatus: { type: 'O', description: 'Out For Delivery Today' },
+              deliveryDate: [{ type: 'SDD', date: '20260904' }],
+              activity: [
+                { status: { type: 'O', description: 'Out For Delivery Today' }, date: '20260904', time: '060000',
+                  location: { address: { city: 'Des Moines', stateProvince: 'IA', countryCode: 'US' } } },
+                { status: { type: 'I', description: 'Arrived at Facility' }, date: '20260903', time: '231200',
+                  location: { address: { city: 'Cedar Rapids', stateProvince: 'IA', countryCode: 'US' } } },
+              ],
+            }],
+          }],
+        },
+      }),
+    };
+  };
+  try {
+    const out = await ups.fetchTracking({ trackingNumber: '1Z999AA10123456784' });
+    assert.equal(out.status, 'out_for_delivery');
+    assert.equal(out.eta_day, '2026-09-04');
+    assert.equal(out.events.length, 2);
+    assert.equal(out.events[0].location, 'Des Moines, IA, US');
+    assert.equal(out.events[1].happened_at, '2026-09-03T23:12:00');
+    assert.equal(out.raw_slug, 'ups');
+  } finally {
+    global.fetch = realFetch;
+  }
+}));
+
+test('a label UPS has not scanned yet is pre-transit, not an error', async () => withUps(async (ups) => {
+  const realFetch = global.fetch;
+  global.fetch = async (url) => {
+    if (String(url).includes('/oauth/token')) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ access_token: 'tok', expires_in: 3600 }) };
+    }
+    return {
+      ok: false,
+      status: 404,
+      text: async () => JSON.stringify({ response: { errors: [{ code: '404', message: 'No tracking information available' }] } }),
+    };
+  };
+  try {
+    const out = await ups.fetchTracking({ trackingNumber: '1Z999AA10123456784' });
+    assert.equal(out.status, 'pre_transit', 'a fresh label is not a failure');
+    assert.deepEqual(out.events, []);
+  } finally {
+    global.fetch = realFetch;
+  }
+}));

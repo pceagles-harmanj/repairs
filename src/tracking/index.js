@@ -29,6 +29,10 @@ function provider() {
   if (!name || name === 'none') return null;
   if (name === 'mock') return require('./providers/mock');
   if (name === 'aftership') return require('./providers/aftership');
+  if (name === 'ups') return require('./providers/ups');
+  if (name === 'fedex') return require('./providers/fedex');
+  if (name === 'usps') return require('./providers/usps');
+  if (name === 'multi') return require('./providers/multi');
   console.warn(`! Unknown TRACKING_PROVIDER "${name}" - tracking updates are off`);
   return null;
 }
@@ -212,9 +216,26 @@ async function pollOne(shipmentId, { today = new Date() } = {}) {
     const changed = apply(shipment, data, { today });
     return { result: 'ok', ...changed };
   } catch (err) {
+    // "No API exists for this carrier" is not a failure. An Amazon Logistics
+    // parcel simply cannot be polled by anyone, so record why and stop asking
+    // rather than filling the error column with the same message every 3 hours.
+    if (err.noProvider) {
+      markPolled(shipmentId);
+      return { result: 'skipped', id: shipmentId, reason: err.reason, note: err.message };
+    }
     recordError(shipmentId, err.message);
     return { result: 'error', id: shipmentId, error: err.message };
   }
+}
+
+/**
+ * Stamp the poll time without touching the status. Used for parcels nobody can
+ * poll, so they drop to the back of the queue instead of being retried first.
+ */
+function markPolled(shipmentId) {
+  getDb()
+    .prepare('UPDATE shipments SET tracking_polled_at = ? WHERE id = ?')
+    .run(new Date().toISOString(), shipmentId);
 }
 
 /**
@@ -223,7 +244,9 @@ async function pollOne(shipmentId, { today = new Date() } = {}) {
  */
 async function poll({ force = false, today = new Date(), respectHours = true } = {}) {
   const p = provider();
-  const summary = { provider: p ? p.name : null, checked: 0, updated: [], errors: [], skipped: null };
+  const summary = {
+    provider: p ? p.name : null, checked: 0, updated: [], errors: [], unpollable: [], skipped: null,
+  };
   if (!p) { summary.skipped = 'tracking_disabled'; return summary; }
   if (respectHours && !withinActiveHours(today)) { summary.skipped = 'outside_active_hours'; return summary; }
 
@@ -231,6 +254,7 @@ async function poll({ force = false, today = new Date(), respectHours = true } =
     summary.checked += 1;
     const res = await pollOne(shipment.id, { today });
     if (res.result === 'error') summary.errors.push(res);
+    else if (res.result === 'skipped' && res.reason) summary.unpollable.push(res);
     else if (res.result === 'ok' && (res.new_events > 0 || res.to !== res.from)) summary.updated.push(res);
   }
   return summary;
@@ -270,6 +294,10 @@ function status() {
   return {
     enabled: enabled(),
     provider: config.tracking.provider,
+    carriers_ready: config.tracking.provider === 'multi'
+      ? require('./providers/multi').ready()
+      : config.tracking.provider === 'none' ? [] : [config.tracking.provider],
+    manual_carriers: ['amazon'],
     poll_minutes: config.tracking.pollMinutes,
     active_hours: `${String(config.tracking.hourFrom).padStart(2, '0')}:00-${String(config.tracking.hourTo).padStart(2, '0')}:00`,
     last_polled_at: last || null,

@@ -62,6 +62,13 @@ google.appendDeviceNote = async (deviceId, line, { maxChars = 500 } = {}) => {
 
 let srv;
 test.before(async () => { srv = await startServer(); });
+
+// A loaner that is already out is refused now - that is the point of the guard,
+// and it has its own tests in loans.test.js. These tests are about the ticket
+// link, so hand everything back between them and keep Loaner-012 available.
+test.beforeEach(() => {
+  getDb().prepare("UPDATE loans SET returned_at = ? WHERE returned_at IS NULL").run(new Date().toISOString());
+});
 test.after(async () => { await srv.close(); });
 
 const newTicket = (over = {}) =>

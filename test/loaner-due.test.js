@@ -24,7 +24,14 @@ const LOANER = {
   model: 'Acer Chromebook 511', org_unit: '/Devices/Loaners', notes: '', recent_users: [],
 };
 google.getDevice = async () => ({ ...LOANER });
-google.searchLoaners = async () => [{ ...LOANER, match: 'exact_asset_tag', exact: true, is_loaner: true }];
+// A loaner that is already out is refused now, so hand back a distinct device
+// per asset tag rather than the same Loaner-012 every time.
+const loanerFor = (term) => {
+  const tag = google.normalizeLoanerTag(String(term || '12'));
+  const n = tag.replace(/\D/g, '') || '12';
+  return { ...LOANER, asset_tag: tag, device_id: `dev-loaner-${n}`, serial: `LNR${n.padStart(6, '0')}` };
+};
+google.searchLoaners = async (term) => [{ ...loanerFor(term), match: 'exact_asset_tag', exact: true, is_loaner: true }];
 google.appendDeviceNote = async () => ({ notes: '', dropped: 0, line: '' });
 google.getAccount = () => ({ email: 'it-admin@example.org' });
 
@@ -33,6 +40,7 @@ let site;
 test.before(async () => { srv = await startServer(); site = await startPublicServer(); });
 test.after(async () => { await srv.close(); await site.close(); });
 
+let loanerSeq = 100;
 const makeLoan = async (over = {}) => {
   const { body } = await srv.call('/api/tickets', {
     method: 'POST',
@@ -42,12 +50,24 @@ const makeLoan = async (over = {}) => {
       notify: false, ...over,
     },
   });
-  await srv.call(`/api/tickets/${body.ticket.id}/loaner`, { method: 'POST', body: { asset_tag: '12' } });
+  loanerSeq += 1;
+  await srv.call(`/api/tickets/${body.ticket.id}/loaner`, { method: 'POST', body: { asset_tag: String(loanerSeq) } });
   return body.ticket.id;
 };
 
-const setDue = (id, day) => getDb().prepare('UPDATE tickets SET loaner_due_at = ? WHERE id = ?').run(day, id);
-const shiftIssued = (id, isoDate) => getDb().prepare('UPDATE tickets SET loaner_issued_at = ? WHERE id = ?').run(isoDate, id);
+// The loan row owns these dates; the ticket columns are a mirror of it.
+const setDue = (id, day) => {
+  getDb().prepare('UPDATE loans SET due_at = ? WHERE ticket_id = ?').run(day, id);
+  getDb().prepare('UPDATE tickets SET loaner_due_at = ? WHERE id = ?').run(day, id);
+};
+/** The tag actually handed out on this ticket - it differs per loan now. */
+const tagFor = (id) =>
+  getDb().prepare('SELECT loaner_asset_tag FROM loans WHERE ticket_id = ? ORDER BY id DESC LIMIT 1').get(id).loaner_asset_tag;
+
+const shiftIssued = (id, isoDate) => {
+  getDb().prepare('UPDATE loans SET issued_at = ? WHERE ticket_id = ?').run(isoDate, id);
+  getDb().prepare('UPDATE tickets SET loaner_issued_at = ? WHERE id = ?').run(isoDate, id);
+};
 
 // ---- school-day arithmetic --------------------------------------------------
 
@@ -161,7 +181,7 @@ test('the due-day reminder mentions the date and the asset tag', async () => {
   const detail = (await srv.call('/api/tickets/' + id)).body.ticket;
   const mail = (await srv.call('/api/emails/' + detail.emails[0].id)).body.email;
   assert.match(mail.subject, /due back today/i);
-  assert.match(mail.body, /Loaner-012/);
+  assert.match(mail.body, new RegExp(tagFor(id)));
   assert.ok(!mail.body.includes('{{'), 'no unrendered placeholders');
 });
 
@@ -180,8 +200,8 @@ test('overdue nudges repeat on the configured cadence and then stop', async () =
   // pretend the last nudge was 3 days ago, twice more, then it gives up
   // age only the most recent nudge, the way the calendar would
   const backdate = (n) => getDb()
-    .prepare(`UPDATE loaner_reminders SET sent_on = ?
-              WHERE id = (SELECT id FROM loaner_reminders WHERE ticket_id = ? AND kind = 'overdue' ORDER BY sent_on DESC, id DESC LIMIT 1)`)
+    .prepare(`UPDATE loan_reminders SET sent_on = ?
+              WHERE id = (SELECT id FROM loan_reminders WHERE ticket_id = ? AND kind = 'overdue' ORDER BY sent_on DESC, id DESC LIMIT 1)`)
     .run(dayOffset(-n), id);
 
   backdate(3);
@@ -195,7 +215,7 @@ test('overdue nudges repeat on the configured cadence and then stop', async () =
   backdate(9);
   res = await loaners.runReminders({ reason: 'test' });
   assert.equal(res.sent.filter((s) => s.ticket_id === id).length, 0, 'stops after the maximum');
-  assert.equal(getDb().prepare("SELECT COUNT(*) n FROM loaner_reminders WHERE ticket_id = ? AND kind = 'overdue'").get(id).n, 3);
+  assert.equal(getDb().prepare("SELECT COUNT(*) n FROM loan_reminders WHERE ticket_id = ? AND kind = 'overdue'").get(id).n, 3);
 });
 
 test('a returned loaner is never chased', async () => {
@@ -206,13 +226,28 @@ test('a returned loaner is never chased', async () => {
   assert.equal(res.sent.filter((s) => s.ticket_id === id).length, 0);
 });
 
-test('re-issuing a loaner starts the reminder history over', async () => {
+test('swapping the loaner on a ticket starts the reminder history over', async () => {
   const id = await makeLoan();
   setDue(id, today());
   await loaners.runReminders({ reason: 'test' });
+  const first = tagFor(id);
   assert.ok(getDb().prepare('SELECT COUNT(*) n FROM loaner_reminders WHERE ticket_id = ?').get(id).n > 0);
-  await srv.call(`/api/tickets/${id}/loaner`, { method: 'POST', body: { asset_tag: '12' } });
-  assert.equal(getDb().prepare('SELECT COUNT(*) n FROM loaner_reminders WHERE ticket_id = ?').get(id).n, 0);
+
+  // A different machine, because the first is still out until it comes back.
+  const swap = await srv.call(`/api/tickets/${id}/loaner`, { method: 'POST', body: { asset_tag: '777' } });
+  assert.equal(swap.status, 200);
+  assert.notEqual(tagFor(id), first, 'the ticket now points at the new loaner');
+
+  // The old loan was closed out rather than left dangling.
+  const old = getDb()
+    .prepare('SELECT returned_at, return_note FROM loans WHERE loaner_asset_tag = ?')
+    .get(first);
+  assert.ok(old.returned_at, 'the previous loaner is no longer counted as out');
+  assert.match(old.return_note, /replaced/);
+
+  // Reminders are per loan, so the new one starts clean.
+  const loanId = getDb().prepare('SELECT id FROM loans WHERE ticket_id = ? ORDER BY id DESC LIMIT 1').get(id).id;
+  assert.equal(getDb().prepare('SELECT COUNT(*) n FROM loaner_reminders WHERE loan_id = ?').get(loanId).n, 0);
 });
 
 test('an unsubscribed student is not chased by email, but still shows on the page', async () => {
@@ -245,7 +280,8 @@ test('the helpdesk digest lists what is overdue and due today', async () => {
   assert.ok(logged, 'the digest is written to the email log');
   const full = (await srv.call('/api/emails/' + logged.id)).body.email;
   assert.match(full.body, /Overdue/);
-  assert.match(full.body, /Loaner-012/);
+  assert.match(full.body, new RegExp(tagFor(a)));
+  assert.match(full.body, new RegExp(tagFor(b)));
 });
 
 test('the reminder schedule reports itself for Settings', () => {
@@ -270,7 +306,7 @@ test('the loaner has a section of its own with the details on it', async () => {
   const html = await publicPage(id);
 
   assert.match(html, /Your loaner device/);
-  assert.match(html, /Loaner-012/);
+  assert.match(html, new RegExp(tagFor(id)));
   assert.match(html, /Acer Chromebook 511/, 'the model is shown');
   assert.match(html, /Borrowed/);
   assert.match(html, /Due back/);
@@ -283,9 +319,9 @@ test('when the repair is ready, the swap is the loudest thing on the page', asyn
   const html = await publicPage(id);
 
   // said in the banner at the top...
-  assert.match(html, /is fixed and waiting for you.*Bring loaner Loaner-012 with you/s);
+  assert.match(html, new RegExp(`is fixed and waiting for you.*Bring loaner ${tagFor(id)} with you`, 's'));
   // ...and again, emphasised, in the loaner section
-  assert.match(html, /class="highlight"[^>]*>\s*Bring loaner Loaner-012 with you\.\s*We hand your own device back when the loaner comes in/);
+  assert.match(html, new RegExp(`class="highlight"[^>]*>\\s*Bring loaner ${tagFor(id)} with you\\.\\s*We hand your own device back when the loaner comes in`));
 });
 
 test('an overdue loaner says so plainly', async () => {
@@ -321,6 +357,6 @@ test('the pickup email uses the same words as the page', async () => {
   const preview = (await srv.call(`/api/tickets/${id}/email/preview`, {
     method: 'POST', body: { status: 'ready_for_pickup' },
   })).body.preview;
-  assert.match(preview.body, /Bring loaner Loaner-012 with you/);
+  assert.match(preview.body, new RegExp(`Bring loaner ${tagFor(id)} with you`));
   assert.match(preview.body, /we hand your own device back when the loaner comes in/i);
 });

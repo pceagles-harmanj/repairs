@@ -369,3 +369,15 @@ tbody tr.clickable:hover { background: var(--panel-2); }
   border: 0; background: none; padding: 0; font: inherit; color: var(--brand, #6b1f32);
   text-decoration: underline; cursor: pointer;
 }
+
+
+/* --- app footer -------------------------------------------------------------- */
+footer.appfoot {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 24px 0 8px; padding: 10px 16px;
+  border-top: 1px solid var(--line);
+  font-size: 12px; color: var(--muted);
+}
+footer.appfoot .grow { flex: 1 1 auto; }
+footer.appfoot .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+footer.appfoot a { color: inherit; }
